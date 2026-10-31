@@ -1,0 +1,11 @@
+{
+  "ubuntu":     { "min": "20.04", "minMajor": 20 },
+  "debian":     { "min": "11",    "minMajor": 11 },
+  "fedora":     { "min": "35",    "minMajor": 35 },
+  "rhel":       { "min": "8",     "minMajor": 8 },
+  "centos":     { "min": "8",     "minMajor": 8 },
+  "alpine":     { "min": "3.14",  "minMajor": 3 },
+  "opensuse":   { "min": "15.3",  "minMajor": 15 },
+  "sles":       { "min": "15",    "minMajor": 15 },
+  "azurelinux": { "min": "2",     "minMajor": 2 }
+}
