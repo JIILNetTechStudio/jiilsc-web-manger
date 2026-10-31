@@ -1,0 +1,6 @@
+{
+  "latest": "1.5.8",
+  "versions": [
+    {"version":"1.5.8","windows_amd64":"https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/dist/scweb-1.5.8-windows-amd64.zip","windows_amd64_sha256":"50dd8c597ebe593eaee82074b205409c3a4ab359e45c35a55676062e167a09c1","windows_arm64":"https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/dist/scweb-1.5.8-windows-arm64.zip","windows_arm64_sha256":"952f0fe93035700b72b3492e75a325611d318cf8870fc277abf724d36e5f6cc0","linux_amd64":"https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/dist/scweb-1.5.8-linux-amd64.tar.gz","linux_amd64_sha256":"32ac60579af52454388b4b2a16d80267de9c1542c907013b02f926064054b4a0","linux_arm64":"https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/dist/scweb-1.5.8-linux-arm64.tar.gz","linux_arm64_sha256":"0dd39a0747d8fb637d1d1113942eac2cc01175d9288c0b898330f345ce287d2b"}
+  ]
+}
