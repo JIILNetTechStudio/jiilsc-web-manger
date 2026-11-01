@@ -709,7 +709,7 @@ function Invoke-InstallAttempt($entry, $dir) {
     }
 
     if (-not (Test-Path -LiteralPath $tmpFile)) {
-        return (Install-FailResult "下载后未生成文件 $tmpFile（磁盘空间不足或被杀毒软件拦截）")
+        return (Install-FailResult "下载后未生成文件 $tmpFile（磁盘空间不足或本机安全策略拦截）")
     }
     Write-Ok "下载完成：$tmpFile"
 
@@ -760,13 +760,13 @@ function Invoke-InstallAttempt($entry, $dir) {
     } catch { }
 
     # 关键自检：三个二进制必须都在。写入后消失基本只有一个原因——
-    # 杀毒软件（如 360 对未签名程序的启发式误报）把它当木马直接删了。
+    # 本机安全软件对未签名程序的启发式拦截。
     $missing = @()
     foreach ($n in @("scweb-panel.exe", "scweb-daemon.exe", "scweb-updater.exe")) {
         if (-not (Test-Path -LiteralPath (Join-Path $dir $n))) { $missing += $n }
     }
     if ($missing.Count -gt 0) {
-        return (Install-FailResult ("写入后被删除：$($missing -join '、')。这通常是杀毒软件把未签名程序当作木马拦截（例如 360 报 TrojanSpy/W64.Agent），请先把 $dir 加入信任/白名单，然后重试安装"))
+        return (Install-FailResult ("写入后被删除：$($missing -join '、')。这通常是本机安全软件对未签名程序的拦截，请先把 $dir 加入信任目录，然后重试安装"))
     }
 
     Write-Ok "已安装到 $dir"
@@ -885,11 +885,11 @@ function Start-Panel($dir) {
     $daemonExe = Join-Path $dir "scweb-daemon.exe"
     $panelExe = Join-Path $dir "scweb-panel.exe"
     if (-not (Test-Path -LiteralPath $daemonExe)) {
-        Write-Bad "未找到 $daemonExe（文件在安装后被删除，通常是杀毒软件隔离，请加入信任后重装）"
+        Write-Bad "未找到 $daemonExe（文件在安装后消失，通常是本机安全软件拦截，请将该目录加入信任后重装）"
         return $false
     }
     if (-not (Test-Path -LiteralPath $panelExe)) {
-        Write-Bad "未找到 $panelExe（文件在安装后被删除，通常是杀毒软件隔离，请加入信任后重装）"
+        Write-Bad "未找到 $panelExe（文件在安装后消失，通常是本机安全软件拦截，请将该目录加入信任后重装）"
         return $false
     }
 
@@ -979,7 +979,7 @@ function Start-PanelWithRetry($dir, $entry) {
 
         Write-Line ""
         Write-Line "  面板未启动成功。请选择下一步："
-        Write-Line "   1) 重新尝试启动（例如已把目录加入杀毒软件白名单之后）"
+        Write-Line "   1) 重新尝试启动（例如已把安装目录加入本机安全软件的信任列表之后）"
         Write-Line "   2) 重新下载并安装该版本（文件缺失时用这个）"
         Write-Line "   3) 打开安装目录（查看日志 / 手动启动）"
         Write-Line "   0) 放弃并退出安装器"
