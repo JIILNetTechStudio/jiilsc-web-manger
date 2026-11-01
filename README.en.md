@@ -1,10 +1,10 @@
 # SCWebManager
 
-A one-stop management panel for Survivalcraft servers, developed and maintained by **JIIL Studio**.
+A one-stop management panel for Survivalcraft servers, developed and maintained by **JIILNetTechStudio**.
 
 > **This repository is for distribution only**: it hosts installer scripts, the version manifest and release downloads.
 > The product source code is not public and is not included here.
-> Copyright © JIIL Studio (JIILStudio). All rights reserved. Copying, redistributing, reverse engineering or any commercial use without written permission is prohibited.
+> Copyright © JIILNetTechStudio. All rights reserved. Copying, redistributing, reverse engineering or any commercial use without written permission is prohibited.
 
 ---
 
@@ -85,4 +85,4 @@ Please open an issue with your OS version, CPU architecture, installation method
 
 ---
 
-**Copyright**: all rights to this product (packages, UI, documentation) belong to JIIL Studio (JIILStudio). This repository is for distribution only and grants no rights to the source code. Redistribution (including republishing on other platforms or bundling into other products), decompilation and republishing of modified builds are prohibited.
+**Copyright**: all rights to this product (packages, UI, documentation) belong to JIILNetTechStudio. This repository is for distribution only and grants no rights to the source code. Redistribution (including republishing on other platforms or bundling into other products), decompilation and republishing of modified builds are prohibited.
