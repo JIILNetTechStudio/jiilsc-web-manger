@@ -559,8 +559,15 @@ resolve_install_target() {
       _reg_norm="$(printf '%s' "$_reg_dir" | sed 's:/$::')"
       _tgt_norm="$(printf '%s' "$INSTALL_DIR" | sed 's:/$::')"
       if [ "$_reg_norm" != "$_tgt_norm" ]; then
-        bad "本机已安装在 $_reg_dir，一台机器只允许一套，请对那套执行升级或先卸载。"
-        return 1
+        # 目标目录本身不是已有安装、且记录目录还在 → 拒绝第二套安装。
+        if [ -d "$_reg_dir" ] && [ ! -f "$INSTALL_DIR/scweb-panel" ]; then
+          bad "本机已安装在 $_reg_dir，一台机器只允许一套，请对那套执行升级或先卸载。"
+          return 1
+        fi
+        if [ ! -d "$_reg_dir" ]; then
+          # 记录目录已被删除：按全新安装继续，安装成功后记录会被覆盖。
+          note "旧安装记录的目录已不存在（$_reg_dir），按全新安装继续"
+        fi
       fi
     fi
     if install_running "$INSTALL_DIR"; then

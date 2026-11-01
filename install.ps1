@@ -651,11 +651,20 @@ function Get-ExistingVersion([string]$dir) {
 # 返回最终安装目录；返回 $null 表示用户取消。
 function Resolve-InstallTarget([string]$dir) {
     while ($true) {
-        # 一台机器只允许一套：记录里的目录与本次目标不同时直接拒绝第二套安装。
+        # 一台机器只允许一套：记录里的目录与本次目标不同、且目标目录不是已有安装时，
+        # 直接拒绝第二套安装（对已有目录执行覆盖安装仍然允许）。
         $records = @(Get-InstallRecords)
         if ($records.Count -gt 0 -and -not (Test-SameDir $records[0].Dir $dir)) {
-            Write-Bad "本机已安装在 $($records[0].Dir)，一台机器只允许一套，请对那套执行升级或先卸载。"
-            return $null
+            $recordExists = Test-Path -LiteralPath $records[0].Dir -PathType Container
+            $targetIsInstall = Test-Path -LiteralPath (Join-Path $dir "scweb-panel.exe")
+            if ($recordExists -and -not $targetIsInstall) {
+                Write-Bad "本机已安装在 $($records[0].Dir)，一台机器只允许一套，请对那套执行升级或先卸载。"
+                return $null
+            }
+            if (-not $recordExists) {
+                # 记录目录已被删除：按全新安装继续，安装成功后记录会被覆盖。
+                Write-Note "旧安装记录的目录已不存在（$($records[0].Dir)），按全新安装继续。"
+            }
         }
         if (Test-InstallRunning $dir) {
             Write-Bad "检测到该目录下的 SCWebManager 正在运行：$dir"
