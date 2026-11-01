@@ -1,0 +1,11 @@
+{
+  "version": "1.5.8",
+  "date": "2026-11-01",
+  "notes": "多架构发行版：Windows x64/arm64、Linux x86_64/aarch64。",
+  "assets": {
+    "windows_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.8/scweb-1.5.8-windows-amd64.zip",
+    "windows_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.8/scweb-1.5.8-windows-arm64.zip",
+    "linux_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.8/scweb-1.5.8-linux-amd64.tar.gz",
+    "linux_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.8/scweb-1.5.8-linux-arm64.tar.gz"
+  }
+}

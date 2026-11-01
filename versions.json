@@ -1,0 +1,6 @@
+{
+  "latest": "1.5.8",
+  "versions": [
+    {"version":"1.5.8","windows_amd64":"https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.8/scweb-1.5.8-windows-amd64.zip","windows_amd64_sha256":"1dbd2b1eef31c25b7be6ba4b668a0790661d1accb5f81ea16ece4af084ee7aff","windows_arm64":"https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.8/scweb-1.5.8-windows-arm64.zip","windows_arm64_sha256":"86811ce579aacc1d13e184ff83041db0ebb6f4aa954f87ae9b861e1d8db1b244","linux_amd64":"https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.8/scweb-1.5.8-linux-amd64.tar.gz","linux_amd64_sha256":"11f6e1de75eeafde35c0b57459306c033585aff21ea3518b074467bfbf00bff6","linux_arm64":"https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.8/scweb-1.5.8-linux-arm64.tar.gz","linux_arm64_sha256":"9a472937627045e4641c39c75df3bf8ea50dece647a90d11fc3425418fdfd1a0"}
+  ]
+}

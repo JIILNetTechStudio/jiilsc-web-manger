@@ -93,6 +93,8 @@ $script:PanelUrl = ""
 $script:PanelProc = $null
 $script:DaemonProc = $null
 $script:RuntimePid = 0
+# 安装过程中产生的临时文件路径：成功启动或安装器退出前才清理，失败时保留现场
+$script:TmpPaths = @()
 
 # 静默/JSON 模式下抑制所有人类可读输出，只在最后输出一条结果
 $script:Mute = ($script:OptSilent -or $script:OptJson)
@@ -167,17 +169,89 @@ function Write-ManualHint {
     Write-Host "    4) 浏览器访问 http://127.0.0.1:18233"
 }
 
+# -------------------- 安装标识记录（Windows 注册表） --------------------
+# 仅用于标识「这台机器装过 SCWebManager、初始装的是哪个版本」，供安装器识别；
+# 面板自身的更新不会改写这里，因此这里的版本永远是最初安装的版本。
+
+$script:RegRoot = "HKCU:\Software\SCWebManager"
+
+# 目录 -> 固定 id（同一目录多次安装会落到同一个记录）
+function Get-InstallId([string]$dir) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($dir.ToLowerInvariant())
+    $hex = [BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', ''
+    $sha.Dispose()
+    return $hex.Substring(0, 12)
+}
+
+# 读取本机已有的安装记录
+function Get-InstallRecords {
+    $out = @()
+    try {
+        $key = Join-Path $script:RegRoot "Installs"
+        if (Test-Path $key) {
+            Get-ChildItem -Path $key -ErrorAction Stop | ForEach-Object {
+                $p = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+                if ($p -and $p.Dir) {
+                    $out += [pscustomobject]@{
+                        Dir         = [string]$p.Dir
+                        Version     = [string]$p.InitialVersion
+                        InstalledAt = [string]$p.InstalledAt
+                    }
+                }
+            }
+        }
+    } catch { }
+    return $out
+}
+
+# 选择目录前提示已有安装（只提示，不阻止安装）
+function Write-InstallRecordHint {
+    if ($script:Mute) { return }
+    $list = @(Get-InstallRecords)
+    if ($list.Count -eq 0) { return }
+    Write-Note "本机已有 SCWebManager 安装记录（仅作标识，面板更新不会改动）："
+    foreach ($it in $list) {
+        $ver = $it.Version
+        if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "未知" }
+        Write-Line "    $($it.Dir)（初始版本 $ver）"
+    }
+    Write-Note "多份安装共用 18233 / 18234 端口会冲突，建议只保留一份；仍可继续安装到其他目录。"
+}
+
+# 安装成功后写入记录（同一目录重复安装时保留最初的版本号）
+function Write-InstallRecord([string]$dir, [string]$version) {
+    try {
+        if (-not (Test-Path $script:RegRoot)) {
+            New-Item -Path $script:RegRoot -Force | Out-Null
+        }
+        $key = Join-Path $script:RegRoot ("Installs\" + (Get-InstallId $dir))
+        $exists = Test-Path $key
+        if (-not $exists) {
+            New-Item -Path $key -Force | Out-Null
+            Set-ItemProperty -Path $key -Name "Dir" -Value $dir
+            Set-ItemProperty -Path $key -Name "InitialVersion" -Value $version
+            Set-ItemProperty -Path $key -Name "InstalledAt" -Value (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
+            Set-ItemProperty -Path $key -Name "Arch" -Value ("windows-" + (Get-ArchKind))
+        } else {
+            Set-ItemProperty -Path $key -Name "Dir" -Value $dir
+        }
+    } catch {
+        Write-Note "写入安装记录失败（不影响使用）：$($_.Exception.Message)"
+    }
+}
+
 # -h 帮助
 function Write-Usage {
     Write-Host ""
     Write-Host "SCWebManager 安装脚本" -ForegroundColor Cyan
-    Write-Host "  powershell -ExecutionPolicy Bypass -File install.ps1 [-f] [-json] [-1 目录] [-2 版本] [-3 y/n]"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File install.ps1 [-f] [-json] [-1 目录] [-2 版本]"
     Write-Host ""
     Write-Host "  -f        静默安装：不询问，全部用默认值，最后只输出一条结果"
     Write-Host "  -json     最终只输出一行标准 JSON（ok/version/installDir/panelUrl/osOk/error）"
     Write-Host "  -1 <答案> 预填第 1 个问题：安装目录"
     Write-Host "  -2 <答案> 预填第 2 个问题：版本号（latest 或具体版本）"
-    Write-Host "  -3 <答案> 预填第 3 个问题：系统版本过低时是否强制安装（y/n）"
+    Write-Host "  -3 <答案> 兼容保留（Windows 版要求 Windows 10 / Server 2016 及以上，不再询问是否强制安装）"
     Write-Host "  -h        显示本帮助"
     Write-Host ""
 }
@@ -215,14 +289,13 @@ function Test-Environment {
     Write-Step "运行环境检查"
     $ok = $true
 
-    # Windows 版本：要求 Windows 10（10.0）以上，或 Windows Server 2012（6.2 且为 Server 产品）以上。
-    # 低于要求不算硬性失败：记录 $script:OsLow，交由 Confirm-OsLow 询问是否强制安装。
+    # Windows 版本门槛：面板二进制基于 Go 1.27，最低只支持 Windows 10 / Windows Server 2016。
+    # 低于该版本的系统无法运行面板，因此直接判定环境不通过（不再提供强制安装选项）。
     $script:OsLow = $false
     $script:OsLowMsg = ""
     try {
         $osMajor = 0
         $osMinor = 0
-        $osProduct = 1
         $osCaption = ""
         try {
             $wos = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
@@ -230,26 +303,21 @@ function Test-Environment {
             $vparts = @(([string]$wos.Version) -split '\.')
             if ($vparts.Count -ge 1) { $osMajor = [int]$vparts[0] }
             if ($vparts.Count -ge 2) { $osMinor = [int]$vparts[1] }
-            $osProduct = [int]$wos.ProductType
         } catch {
-            # 没有 CIM 时退回 .NET 版本号（无法区分 Client/Server）
+            # 没有 CIM 时退回 .NET 版本号
             $v = [Environment]::OSVersion.Version
             $osMajor = $v.Major
             $osMinor = $v.Minor
         }
 
-        $isServer = ($osProduct -eq 2 -or $osProduct -eq 3)
         $verTxt = "$osMajor.$osMinor"
         $osDesc = ""
         if ($osCaption) { $osDesc = "（$osCaption）" }
         if ($osMajor -ge 10) {
             Write-Ok "Windows 版本 $verTxt$osDesc"
-        } elseif ($osMajor -eq 6 -and $osMinor -ge 2 -and $isServer) {
-            Write-Ok "Windows Server 版本 $verTxt$osDesc"
         } else {
-            $script:OsLow = $true
-            $script:OsLowMsg = "操作系统版本过低（当前 $verTxt$osDesc；要求 Windows 10 或 Windows Server 2012 以上）。面板本身兼容性极强，但运行生存战争服务端可能遇到问题，建议升级后再安装。"
-            Write-Note $script:OsLowMsg
+            Write-Bad "操作系统版本过低（当前 $verTxt$osDesc；要求 Windows 10 或 Windows Server 2016 及以上），面板无法在该系统上运行"
+            $ok = $false
         }
     } catch {
         Write-Bad "无法识别操作系统版本：$($_.Exception.Message)"
@@ -333,6 +401,30 @@ function Test-Environment {
 
 # -------------------------- 安装目录选择 --------------------------
 
+# 规范化用户输入的目录：去空白、去引号、展开环境变量、去尾部反斜杠
+function Format-InstallDir([string]$p) {
+    $p = "$p".Trim()
+    $p = $p.Trim([char]'"', [char]39)
+    $p = [Environment]::ExpandEnvironmentVariables($p)
+    return $p.TrimEnd([char]92)
+}
+
+# 目录是否可用：必须是根路径；已存在时必须是目录；不存在时其父目录必须存在
+function Test-InstallDirPath([string]$p) {
+    if ([string]::IsNullOrWhiteSpace($p)) { return $false }
+    try {
+        if (-not [System.IO.Path]::IsPathRooted($p)) { return $false }
+        if (Test-Path -LiteralPath $p) {
+            return (Test-Path -LiteralPath $p -PathType Container)
+        }
+        $parent = Split-Path -Parent $p
+        if ([string]::IsNullOrWhiteSpace($parent)) { return $false }
+        return (Test-Path -LiteralPath $parent -PathType Container)
+    } catch {
+        return $false
+    }
+}
+
 function Select-InstallDir {
     $default = Join-Path $env:LOCALAPPDATA "SCWebManager"
     Write-Step "选择安装目录"
@@ -341,39 +433,79 @@ function Select-InstallDir {
     $pre = Get-Prefill 1
     if ([string]::IsNullOrWhiteSpace($pre) -and $script:OptSilent) { $pre = $default }
 
-    $chosen = ""
     if (-not [string]::IsNullOrWhiteSpace($pre)) {
-        $chosen = $pre
+        $chosen = Format-InstallDir $pre
         Write-Line "  使用指定目录：$chosen"
-    } else {
-        Write-Line "  默认目录：$default"
-        try {
-            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-            $dlg.Description = "请选择 SCWebManager 的安装目录"
-            $dlg.SelectedPath = $default
-            $dlg.ShowNewFolderButton = $true
-            $result = $dlg.ShowDialog()
-            if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $dlg.SelectedPath) {
-                $chosen = $dlg.SelectedPath
-            }
-        } catch {
-            $chosen = ""
-        }
+        return $chosen
+    }
 
-        if ([string]::IsNullOrWhiteSpace($chosen)) {
-            $input = Read-Host "请输入安装目录（直接回车使用默认）"
-            if (-not [string]::IsNullOrWhiteSpace($input)) { $chosen = $input }
+    Write-InstallRecordHint
+
+    $chosen = ""
+    while ([string]::IsNullOrWhiteSpace($chosen)) {
+        Write-Line ""
+        Write-Line "  请在下列方式中选择安装目录："
+        Write-Line "   1) 使用默认目录（$default）"
+        Write-Line "   2) 手动输入目录"
+        Write-Line "   3) 打开文件管理器选择目录"
+        $a = Read-Host "  请输入 1 / 2 / 3（直接回车 = 1）"
+        if ($null -eq $a) { $a = "" }
+        $a = $a.Trim()
+        switch ($a) {
+            { $_ -eq "" -or $_ -eq "1" } {
+                $chosen = $default
+                Write-Line "  使用默认目录：$chosen" Green
+            }
+            "2" {
+                $p = Read-Host "  请输入安装目录的完整路径"
+                $p = Format-InstallDir $p
+                if (Test-InstallDirPath $p) {
+                    $chosen = $p
+                    Write-Line "  使用目录：$chosen" Green
+                } else {
+                    Write-Bad "路径无效：$p"
+                    Write-Note "请重新选择（输入必须是以盘符开头的完整路径，且父目录存在）"
+                }
+            }
+            "3" {
+                $picked = Show-FolderPicker $default
+                if ([string]::IsNullOrWhiteSpace($picked)) {
+                    Write-Note "已取消文件管理器选择，请重新选择"
+                } elseif (Test-InstallDirPath $picked) {
+                    $chosen = Format-InstallDir $picked
+                    Write-Line "  使用目录：$chosen" Green
+                } else {
+                    Write-Bad "所选路径不可用：$picked"
+                }
+            }
+            default {
+                Write-Bad "输入无效：$a"
+                Write-Note "请输入 1、2 或 3，直接回车使用默认目录"
+            }
         }
     }
-    if ([string]::IsNullOrWhiteSpace($chosen)) { $chosen = $default }
-
-    $chosen = $chosen.Trim()
-    $chosen = $chosen.Trim([char]'"', [char]39)
-    $chosen = [Environment]::ExpandEnvironmentVariables($chosen)
     $chosen = $chosen.TrimEnd([char]92)
     return $chosen
 }
+
+# 打开 Windows 文件管理器目录选择框；不可用或取消时返回空串
+function Show-FolderPicker([string]$initial) {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description = "请选择 SCWebManager 的安装目录"
+        $dlg.SelectedPath = $initial
+        $dlg.ShowNewFolderButton = $true
+        $r = $dlg.ShowDialog()
+        if ($r -eq [System.Windows.Forms.DialogResult]::OK -and $dlg.SelectedPath) {
+            return $dlg.SelectedPath
+        }
+    } catch {
+        Write-Note "当前环境无法打开文件管理器选择框（$($_.Exception.Message)）"
+    }
+    return ""
+}
+
 
 # ---------------------------- 版本列表 ----------------------------
 
@@ -426,9 +558,10 @@ function Get-SortedVersions($versions) {
         } -Descending)
 }
 
-function Confirm-Yes {
+function Confirm-Yes([string]$prompt) {
+    if ([string]::IsNullOrWhiteSpace($prompt)) { $prompt = "是否立即开始安装？(y/n)" }
     while ($true) {
-        $a = Read-Host "是否立即开始安装？(y/n)"
+        $a = Read-Host $prompt
         if ($null -ne $a) {
             switch ($a.Trim().ToLower()) {
                 "y" { return $true }
@@ -444,42 +577,6 @@ function Confirm-DefaultYes($prompt) {
     if ([string]::IsNullOrWhiteSpace($a)) { return $true }
     if ($a.Trim().ToLower() -eq "n") { return $false }
     return $true
-}
-
-# 系统版本过低时询问是否强制安装（问题 3，可用 -3 y / -3 n 预填）
-function Confirm-OsLow {
-    if (-not $script:OsLow) { return $true }
-    Write-Note $script:OsLowMsg
-
-    $ans = Get-Prefill 3
-    if ([string]::IsNullOrWhiteSpace($ans)) {
-        if ($script:OptSilent) {
-            $script:FailMsg = "操作系统版本过低，已按安全默认中止安装；如确认继续，请追加参数 -3 y"
-            return $false
-        }
-        while ($true) {
-            $a = Read-Host "是否仍要继续安装？(y/n)"
-            if ($null -eq $a) { $a = "" }
-            $a = $a.Trim().ToLower()
-            if ($a -eq "y" -or $a -eq "yes") {
-                Write-Note "已按用户要求继续安装（系统版本低于建议值）"
-                return $true
-            }
-            if ($a -eq "n" -or $a -eq "no") {
-                $script:FailMsg = "用户取消安装（操作系统版本过低）"
-                return $false
-            }
-            Write-Host "  请输入 y 或 n" -ForegroundColor Yellow
-        }
-    }
-
-    $ans = $ans.Trim().ToLower()
-    if ($ans -eq "y" -or $ans -eq "yes") {
-        Write-Note "已按指定参数继续安装（系统版本低于建议值）"
-        return $true
-    }
-    $script:FailMsg = "用户取消安装（操作系统版本过低）"
-    return $false
 }
 
 function Select-Version($cfg) {
@@ -556,7 +653,22 @@ function Select-Version($cfg) {
 
 # ---------------------------- 下载安装 ----------------------------
 
-function Install-Version($entry, $dir) {
+function Install-FailResult($reason) { return [pscustomobject]@{ Ok = $false; Reason = $reason } }
+function Install-OkResult { return [pscustomobject]@{ Ok = $true; Reason = "" } }
+
+# 清理安装过程中产生的临时文件（只在安装成功或安装器退出前调用，
+# 这样失败后仍能保留现场，便于排查或手动复用已下载的安装包）
+function Clear-TmpPaths {
+    foreach ($p in @($script:TmpPaths)) {
+        if ($p -and (Test-Path -LiteralPath $p)) {
+            try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    }
+    $script:TmpPaths = @()
+}
+
+# 安装一次（不含重试逻辑）：返回 @{ Ok = 布尔; Reason = 失败原因 }
+function Invoke-InstallAttempt($entry, $dir) {
     Write-Step "下载并安装面板 $([string]$entry.version)"
 
     # 按本机架构选包：优先 windows_<arch> / windows_<arch>_sha256，
@@ -575,12 +687,8 @@ function Install-Version($entry, $dir) {
     if ([string]::IsNullOrWhiteSpace($sha)) { $sha = Get-EntryField $entry "sha256" }
 
     if ([string]::IsNullOrWhiteSpace($url)) {
-        if ($archKind) {
-            Write-Bad "该版本没有提供 Windows $archKind 安装包"
-        } else {
-            Write-Bad "该版本没有提供 Windows 安装包"
-        }
-        return $false
+        if ($archKind) { return (Install-FailResult "该版本没有提供 Windows $archKind 安装包") }
+        return (Install-FailResult "该版本没有提供 Windows 安装包")
     }
 
     $name = $url
@@ -589,20 +697,19 @@ function Install-Version($entry, $dir) {
     if ([string]::IsNullOrWhiteSpace($name)) { $name = "scweb-$([string]$entry.version).zip" }
     $tmpFile = Join-Path $env:TEMP $name
     $stage = Join-Path $env:TEMP ("scweb-stage-" + [guid]::NewGuid().ToString("N"))
+    $script:TmpPaths += $tmpFile
+    $script:TmpPaths += $stage
 
     try {
         Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
         Write-Line "  下载：$url"
         Invoke-WebRequest -Uri $url -OutFile $tmpFile -UseBasicParsing -TimeoutSec 180
     } catch {
-        Write-Bad "下载失败：$($_.Exception.Message)"
-        Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
-        return $false
+        return (Install-FailResult "网络下载失败：$($_.Exception.Message)")
     }
 
     if (-not (Test-Path -LiteralPath $tmpFile)) {
-        Write-Bad "下载失败：未生成文件 $tmpFile"
-        return $false
+        return (Install-FailResult "下载后未生成文件 $tmpFile（磁盘空间不足或被杀毒软件拦截）")
     }
     Write-Ok "下载完成：$tmpFile"
 
@@ -610,15 +717,11 @@ function Install-Version($entry, $dir) {
         try {
             $hash = (Get-FileHash -LiteralPath $tmpFile -Algorithm SHA256).Hash.ToLower()
             if ($hash -ne $sha.Trim().ToLower()) {
-                Write-Bad "SHA256 校验失败（期望 $sha，实际 $hash）"
-                Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
-                return $false
+                return (Install-FailResult "下载文件不完整（SHA256 不一致，期望 $sha 实际 $hash），请重试")
             }
             Write-Ok "SHA256 校验通过"
         } catch {
-            Write-Bad "SHA256 校验出错：$($_.Exception.Message)"
-            Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
-            return $false
+            return (Install-FailResult "SHA256 校验出错：$($_.Exception.Message)")
         }
     }
 
@@ -626,18 +729,14 @@ function Install-Version($entry, $dir) {
         New-Item -ItemType Directory -Force -Path $stage | Out-Null
         Expand-Archive -LiteralPath $tmpFile -DestinationPath $stage -Force
     } catch {
-        Write-Bad "解压失败：$($_.Exception.Message)"
-        Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
+        return (Install-FailResult "安装包解压失败（文件可能损坏或被拦截）：$($_.Exception.Message)")
     }
 
     try {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $items = @(Get-ChildItem -LiteralPath $stage -Force)
         if ($items.Count -eq 0) {
-            Write-Bad "安装包内容为空"
-            return $false
+            return (Install-FailResult "安装包内容为空")
         }
         foreach ($item in $items) {
             $dst = Join-Path $dir $item.Name
@@ -652,10 +751,7 @@ function Install-Version($entry, $dir) {
             }
         }
     } catch {
-        Write-Bad "安装文件写入失败：$($_.Exception.Message)"
-        Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-        return $false
+        return (Install-FailResult "写入安装目录失败（权限不足或文件被占用）：$($_.Exception.Message)")
     }
 
     try {
@@ -663,12 +759,37 @@ function Install-Version($entry, $dir) {
             Unblock-File -ErrorAction SilentlyContinue
     } catch { }
 
-    Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    # 关键自检：三个二进制必须都在。写入后消失基本只有一个原因——
+    # 杀毒软件（如 360 对未签名程序的启发式误报）把它当木马直接删了。
+    $missing = @()
+    foreach ($n in @("scweb-panel.exe", "scweb-daemon.exe", "scweb-updater.exe")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $dir $n))) { $missing += $n }
+    }
+    if ($missing.Count -gt 0) {
+        return (Install-FailResult ("写入后被删除：$($missing -join '、')。这通常是杀毒软件把未签名程序当作木马拦截（例如 360 报 TrojanSpy/W64.Agent），请先把 $dir 加入信任/白名单，然后重试安装"))
+    }
 
     Write-Ok "已安装到 $dir"
-    return $true
+    return (Install-OkResult)
 }
+
+# 安装（带重试）：失败时打印原因并询问是否重试（静默/JSON 模式直接返回失败）
+function Install-Version($entry, $dir) {
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        if ($attempt -gt 1) { Write-Note "重新尝试安装（第 $attempt 次）" }
+        $r = Invoke-InstallAttempt $entry $dir
+        if ($r.Ok) { return $true }
+        Write-Bad "安装失败：$($r.Reason)"
+        if ($script:Mute) { return $false }
+        if (-not (Confirm-Yes "是否重试安装？(y/n)")) {
+            Write-Note "已放弃本次安装；可稍后手动下载安装包解压到 $dir"
+            return $false
+        }
+    }
+}
+
 
 # ---------------------------- 进程控制 ----------------------------
 
@@ -764,11 +885,11 @@ function Start-Panel($dir) {
     $daemonExe = Join-Path $dir "scweb-daemon.exe"
     $panelExe = Join-Path $dir "scweb-panel.exe"
     if (-not (Test-Path -LiteralPath $daemonExe)) {
-        Write-Bad "未找到 $daemonExe，安装包结构异常"
+        Write-Bad "未找到 $daemonExe（文件在安装后被删除，通常是杀毒软件隔离，请加入信任后重装）"
         return $false
     }
     if (-not (Test-Path -LiteralPath $panelExe)) {
-        Write-Bad "未找到 $panelExe，安装包结构异常"
+        Write-Bad "未找到 $panelExe（文件在安装后被删除，通常是杀毒软件隔离，请加入信任后重装）"
         return $false
     }
 
@@ -836,12 +957,49 @@ function Start-Panel($dir) {
             Write-Bad "面板进程提前退出，日志如下："
             if (-not $script:Mute) {
                 Get-Content (Join-Path $dir "panel.err.log") -Tail 30 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+                $startupErr = Join-Path $dir "data\startup-error.log"
+                if (Test-Path -LiteralPath $startupErr) {
+                    Write-Note "启动错误记录（data\startup-error.log）："
+                    Get-Content $startupErr -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+                }
             }
             return $false
         }
     } catch { }
 
     return $true
+}
+
+# 启动面板（带失败后的处理菜单）：返回 $true 表示最终启动成功。
+# 失败时不直接退出安装器，用户可以修好问题后重试、或直接重装这个版本。
+function Start-PanelWithRetry($dir, $entry) {
+    while ($true) {
+        if (Start-Panel $dir) { return $true }
+        if ($script:Mute) { return $false }
+
+        Write-Line ""
+        Write-Line "  面板未启动成功。请选择下一步："
+        Write-Line "   1) 重新尝试启动（例如已把目录加入杀毒软件白名单之后）"
+        Write-Line "   2) 重新下载并安装该版本（文件缺失时用这个）"
+        Write-Line "   3) 打开安装目录（查看日志 / 手动启动）"
+        Write-Line "   0) 放弃并退出安装器"
+        $c = Read-Host "  请输入 1 / 2 / 3 / 0"
+        if ($null -eq $c) { $c = "" }
+        switch ($c.Trim()) {
+            "1" { continue }
+            "2" {
+                if (Install-Version $entry $dir) { continue } else { return $false }
+            }
+            "3" {
+                try { Start-Process -FilePath "explorer.exe" -ArgumentList @($dir) | Out-Null } catch { }
+            }
+            "0" {
+                $script:FailMsg = "面板启动失败，已放弃安装"
+                return $false
+            }
+            default { Write-Bad "输入无效，请输入 1 / 2 / 3 / 0" }
+        }
+    }
 }
 
 # ---------------------------- 完成提示 ----------------------------
@@ -896,7 +1054,10 @@ function Show-Menu($entry, $dir) {
         } elseif ($c -eq "2") {
             Write-Host ""
             if (Install-Version $entry $dir) {
-                if (Start-Panel $dir) { Show-Success $dir } else { Write-Bad "重新启动失败，请查看 $dir\panel.err.log" }
+                if (Start-PanelWithRetry $dir $entry) {
+                    Write-InstallRecord $dir ([string]$entry.version)
+                    Show-Success $dir
+                } else { Write-Bad "重新启动失败，请查看 $dir\panel.err.log" }
             } else {
                 Write-Bad "重新拉取失败，请检查网络后重试"
             }
@@ -919,9 +1080,6 @@ function Main {
         Write-ManualHint
         return $false
     }
-
-    # 系统版本过低：询问是否强制安装（-3 y 可跳过询问）
-    if (-not (Confirm-OsLow)) { return $false }
 
     $dir = Select-InstallDir
     if ([string]::IsNullOrWhiteSpace($dir)) {
@@ -956,13 +1114,14 @@ function Main {
         return $false
     }
 
-    if (-not (Start-Panel $dir)) {
-        $script:FailMsg = "面板启动失败，请查看 $dir\panel.err.log / daemon.err.log"
+    if (-not (Start-PanelWithRetry $dir $entry)) {
+        if (-not $script:FailMsg) { $script:FailMsg = "面板启动失败，请查看 $dir\panel.err.log / daemon.err.log" }
         Write-Line ""
         Write-Line "启动失败。请查看 $dir\panel.err.log / daemon.err.log。" Red
         return $false
     }
 
+    Write-InstallRecord $dir $script:ResultVersion
     Show-Success $dir
     # 静默/JSON 模式不进入驻留菜单
     if (-not $script:Mute) { Show-Menu $entry $dir }
@@ -997,4 +1156,13 @@ if ($script:OptJson) {
     } else {
         [Console]::Out.WriteLine("安装失败：$($script:FailMsg)")
     }
+}
+
+# 临时文件只在安装结束（成功或退出）时清理，安装失败期间保留现场便于复现
+Clear-TmpPaths
+
+# 交互模式失败时停一下，避免双击运行时窗口一闪而过
+if (-not $script:Mute -and -not ($mainOk -and -not $script:FailMsg)) {
+    Write-Host ""
+    try { [void](Read-Host "  按回车键退出安装器") } catch { }
 }
