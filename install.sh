@@ -18,7 +18,7 @@ set -u
 # 没有 PowerShell 的机器可手动下载安装：
 #   1) 打开 versions.json，按本机架构找到目标版本的 "linux_amd64" 或 "linux_arm64" 下载直链
 #   2) 下载后用 tar/unzip 解压到任意目录
-#   3) 先运行 ./scweb-daemon -dir <安装目录>，再运行 ./scweb-panel
+#   3) 先运行 ./scweb-daemon -dir <安装目录>/data，再运行 ./scweb-panel
 #   4) 浏览器访问 http://127.0.0.1:18233
 
 VERSIONS_URL="https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/versions.json"
@@ -94,7 +94,7 @@ SCWebManager 安装脚本（Linux）
 手动安装（无需本脚本）：
   1) 打开 versions.json，按本机架构找到目标版本的 linux_amd64 或 linux_arm64 下载直链
   2) 下载后用 tar/unzip 解压到目标目录
-  3) 先运行 ./scweb-daemon -dir <安装目录>，再运行 ./scweb-panel
+  3) 先运行 ./scweb-daemon -dir <安装目录>/data，再运行 ./scweb-panel
   4) 浏览器访问 http://127.0.0.1:18233
 EOF
 }
@@ -1235,7 +1235,10 @@ start_panel() {
     bad "无法进入安装目录 $INSTALL_DIR"
     return 1
   }
-  nohup "$INSTALL_DIR/scweb-daemon" -dir "$INSTALL_DIR" >"$INSTALL_DIR/daemon.log" 2>&1 &
+  # -dir 必须是数据目录 data/：面板固定在该目录读写 config.json，
+  # 传安装目录会让 daemon 另建一份配置（secret 不同），表现为「面板在线、守护进程离线」。
+  mkdir -p "$INSTALL_DIR/data" 2>/dev/null || true
+  nohup "$INSTALL_DIR/scweb-daemon" -dir "$INSTALL_DIR/data" >"$INSTALL_DIR/daemon.log" 2>&1 &
   DAEMON_PID=$!
   ok "守护进程已启动（pid $DAEMON_PID）"
   sleep 2

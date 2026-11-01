@@ -16,7 +16,7 @@
 #   1) 打开 https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/versions.json
 #   2) 按本机架构找到目标版本的 "windows_amd64" 或 "windows_arm64" 下载直链，保存 zip
 #   3) 解压到任意目录（例如 %LOCALAPPDATA%\SCWebManager），保留已有 data 目录
-#   4) 先运行 scweb-daemon.exe -dir <安装目录>，再运行 scweb-panel.exe
+#   4) 先运行 scweb-daemon.exe -dir <安装目录>\data，再运行 scweb-panel.exe
 #   5) 浏览器访问 http://127.0.0.1:18233
 # ===========================================================================
 
@@ -165,7 +165,7 @@ function Write-ManualHint {
     Write-Host "  手动安装（无需 PowerShell）：" -ForegroundColor Yellow
     Write-Host "    1) 打开 $script:VersionsUrl ，按本机架构找到目标版本的 windows_amd64 或 windows_arm64 下载直链"
     Write-Host "    2) 下载 zip 后解压到目标目录（保留已有的 data 目录，避免丢配置）"
-    Write-Host "    3) 先运行 scweb-daemon.exe -dir <安装目录>，再运行 scweb-panel.exe"
+    Write-Host "    3) 先运行 scweb-daemon.exe -dir <安装目录>\data，再运行 scweb-panel.exe"
     Write-Host "    4) 浏览器访问 http://127.0.0.1:18233"
 }
 
@@ -1146,8 +1146,12 @@ function Start-Panel($dir) {
     Start-Sleep -Milliseconds 600
 
     try {
+        # -dir 必须是数据目录 <安装目录>\data：面板固定在该目录读写 config.json，
+        # 传安装目录会让 daemon 另建一份配置（secret 不同），表现为「面板在线、守护进程离线」。
+        $dataDir = Join-Path $dir "data"
+        New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
         $script:DaemonProc = Start-Process -FilePath $daemonExe `
-            -ArgumentList @("-dir", ('"' + $dir + '"')) `
+            -ArgumentList @("-dir", ('"' + $dataDir + '"')) `
             -WorkingDirectory $dir -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $dir "daemon.log") `
             -RedirectStandardError (Join-Path $dir "daemon.err.log")

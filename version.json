@@ -1,11 +1,11 @@
 {
-  "version": "1.5.9",
+  "version": "1.5.10",
   "date": "2026-11-01",
-  "notes": "新增维护工具 scweb-manage；面板多实例统一清单与别名；面板内 HTTPS 证书配置；面板设置补齐监听地址与插件站地址。",
+  "notes": "修复：1) 守护进程与面板数据目录不一致，导致「面板在线、守护进程离线」，文件/终端/定时任务/导入服务端等 daemon 接口全部 502；2) 面板内一键整包更新无法执行（未识别 assets 整包地址）；3) 更新后重启面板可能用错数据目录；4) Windows 仪表盘系统版本中文乱码；5) AI 常用厂商预设补全正确模型名与最新接口地址。",
   "assets": {
-    "windows_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.9/scweb-1.5.9-windows-amd64.zip",
-    "windows_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.9/scweb-1.5.9-windows-arm64.zip",
-    "linux_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.9/scweb-1.5.9-linux-amd64.tar.gz",
-    "linux_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.9/scweb-1.5.9-linux-arm64.tar.gz"
+    "windows_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.10/scweb-1.5.10-windows-amd64.zip",
+    "windows_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.10/scweb-1.5.10-windows-arm64.zip",
+    "linux_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.10/scweb-1.5.10-linux-amd64.tar.gz",
+    "linux_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.10/scweb-1.5.10-linux-arm64.tar.gz"
   }
 }

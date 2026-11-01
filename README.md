@@ -133,7 +133,7 @@ curl -fsSL https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/install.sh 
 
 ```powershell
 # Windows
-Get-FileHash .\scweb-1.5.9-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\scweb-1.5.10-windows-amd64.zip -Algorithm SHA256
 ```
 
 ```bash

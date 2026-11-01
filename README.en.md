@@ -125,7 +125,7 @@ Optional arguments: `-1 <dir>` install directory, `-2 <version>`, `-f` silent in
 `SHA256SUMS` in each release lists the SHA-256 of every package. It is a text file, not a program.
 
 ```powershell
-Get-FileHash .\scweb-1.5.9-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\scweb-1.5.10-windows-amd64.zip -Algorithm SHA256
 ```
 
 ```bash
