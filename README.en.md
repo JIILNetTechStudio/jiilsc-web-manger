@@ -80,7 +80,7 @@ Out of the box: create an instance → start the server → watch the console �
 | Users and permissions | Super admin / admin / regular user, groups, permissions, instance grants |
 | Audit | Logins, permission changes, dangerous operations and AI activity |
 | Settings | Port, bind address, site title, access scope, log retention, highlight rules, HTTPS certificate, plugin site address, panel instance list and aliases, UI scale, languages (Chinese / English / Traditional Chinese) |
-| Maintenance tool | `scweb-manage`: start, autostart state, repair, fresh install, uninstall, check updates, set alias |
+| Maintenance tool | `scweb` (`scweb-manage` on Windows): start, autostart state, repair, fresh install, uninstall, check updates, set alias |
 
 ## Supported platforms
 
@@ -107,7 +107,9 @@ curl -fsSL https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/install.sh 
 
 The installer detects the CPU architecture, asks where to install, then starts the daemon and panel and prints the access URL and initial administrator credentials.
 
-It also installs the maintenance tool `scweb-manage`: on Windows at `%LOCALAPPDATA%\SCWebManager\scweb-manage.exe` with desktop and Start Menu shortcuts; on Linux at `~/.local/bin/scweb-manage` (a PATH hint is printed when needed).
+It also installs the maintenance tool: on Windows at `%LOCALAPPDATA%\SCWebManager\scweb-manage.exe` with desktop and Start Menu shortcuts; on Linux at `~/.local/bin/scweb`, runnable as `scweb` (the script adds that directory to PATH and registers a global command when `/usr/local/bin` is writable).
+
+If the chosen directory already contains a panel: when it is running you are asked to stop it before reinstalling; when it is stopped you choose between overwrite (keep config and data) and a fresh install in another directory.
 
 Optional arguments: `-1 <dir>` install directory, `-2 <version>`, `-f` silent install, `-json` machine-readable result.
 

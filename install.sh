@@ -424,10 +424,15 @@ record_install() {
   _rdir="$(printf '%s' "$INSTALL_DIR" | tr -d '\t')"
   _rver="${RESULT_VERSION:-unknown}"
   mkdir -p "$(dirname "$_rf")" 2>/dev/null || return 0
+  _rnow="$(date '+%Y-%m-%dT%H:%M:%S')"
   if [ -f "$_rf" ] && awk -F '\t' -v d="$_rdir" '$1==d{f=1} END{exit f?0:1}' "$_rf"; then
+    # 已有记录：只更新版本与时间，保留架构 / 别名 / 最后启动等其它列
+    _rtmp="$_rf.tmp.$$"
+    awk -F '\t' -v d="$_rdir" -v v="$_rver" -v t="$_rnow" 'BEGIN{OFS="\t"} $1==d{$2=v;$3=t} {print}' "$_rf" > "$_rtmp" 2>/dev/null \
+      && mv -f "$_rtmp" "$_rf" 2>/dev/null || rm -f "$_rtmp" 2>/dev/null
     return 0
   fi
-  printf '%s\t%s\t%s\n' "$_rdir" "$_rver" "$(date '+%Y-%m-%dT%H:%M:%S')" >> "$_rf" 2>/dev/null || true
+  printf '%s\t%s\t%s\n' "$_rdir" "$_rver" "$_rnow" >> "$_rf" 2>/dev/null || true
   return 0
 }
 
@@ -496,6 +501,102 @@ select_dir() {
       *)
         bad "输入无效：$_sel"
         note "请输入 1 或 2，直接回车使用默认目录" ;;
+    esac
+  done
+}
+
+# -------------------------- 已安装 / 正在运行检测 --------------------------
+
+# 该目录下的面板或守护进程是否正在运行
+install_running() {
+  _ir_dir="$1"
+  [ -n "$_ir_dir" ] || return 1
+  _ir_rt="$_ir_dir/data/runtime.json"
+  if [ -f "$_ir_rt" ]; then
+    _ir_pid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_ir_rt" 2>/dev/null | head -n 1)"
+    if [ -n "$_ir_pid" ] && kill -0 "$_ir_pid" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    if pgrep -f -- "$_ir_dir/scweb-panel" >/dev/null 2>&1; then return 0; fi
+    if pgrep -f -- "$_ir_dir/scweb-daemon" >/dev/null 2>&1; then return 0; fi
+  fi
+  return 1
+}
+
+# 从安装记录里取该目录已安装的版本（取不到返回空）
+existing_version() {
+  _ev_file="$(install_registry_file)"
+  _ev_line="$(awk -F '\t' -v d="$INSTALL_DIR" '$1==d{print; exit}' "$_ev_file" 2>/dev/null)"
+  [ -n "$_ev_line" ] || return 0
+  printf '%s' "$_ev_line" | cut -f2
+}
+
+# 选定目录后处理两种情况：
+#   1) 该目录的面板正在运行：必须终止后才能重新安装；
+#   2) 该目录已有面板但未运行：选择覆盖安装（保留配置/数据）或另选目录全新安装。
+resolve_install_target() {
+  while :; do
+    if install_running "$INSTALL_DIR"; then
+      bad "检测到该目录下的 SCWebManager 正在运行：$INSTALL_DIR"
+      note "面板正在运行，必须先终止进程才能进行重新安装。"
+      if [ "$MUTE" -eq 1 ]; then
+        stop_panel >/dev/null 2>&1
+        note "静默模式：已终止正在运行的进程"
+      else
+        printf '   1) 终止正在运行的进程并继续安装\n'
+        printf '   0) 取消并退出安装器\n'
+        prompt_read "  请输入 1 / 0（直接回车 = 0）: "
+        _rt_sel="$(printf '%s' "$REPLY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        case "$_rt_sel" in
+          ""|0)
+            note "已取消：请先通过维护工具停止面板后再安装。"
+            return 1 ;;
+          1)
+            stop_panel
+            ok "已终止 ${STOPPED_COUNT:-0} 个进程"
+            sleep 1 2>/dev/null || true
+            if install_running "$INSTALL_DIR"; then
+              bad "进程仍未退出，请稍后重试或手动结束进程后再安装。"
+              return 1
+            fi ;;
+          *)
+            bad "输入无效：$_rt_sel"
+            note "请输入 1 或 0，直接回车取消"
+            continue ;;
+        esac
+      fi
+      return 0
+    fi
+
+    [ -x "$INSTALL_DIR/scweb-panel" ] || return 0
+
+    _ev_ver="$(existing_version)"
+    if [ -z "$_ev_ver" ]; then _ev_ver="未知"; fi
+    bad "该目录下已存在 SCWebManager（版本 $_ev_ver）：$INSTALL_DIR"
+    if [ "$MUTE" -eq 1 ]; then
+      note "静默模式：按覆盖安装继续（保留配置与数据）"
+      return 0
+    fi
+    printf '   1) 覆盖安装（修复当前实例：替换程序文件，保留配置与数据）\n'
+    printf '   2) 全新安装（另选一个目录，新增实例，不影响当前实例）\n'
+    printf '   0) 取消并退出安装器\n'
+    prompt_read "  请输入 1 / 2 / 0（直接回车 = 1）: "
+    _rt_sel="$(printf '%s' "$REPLY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$_rt_sel" in
+      ""|1)
+        printf '  继续使用该目录（覆盖安装）\n'
+        return 0 ;;
+      2)
+        select_dir
+        [ -n "$INSTALL_DIR" ] || return 1 ;;
+      0)
+        note "已取消安装。"
+        return 1 ;;
+      *)
+        bad "输入无效：$_rt_sel"
+        note "请输入 1、2 或 0，直接回车执行覆盖安装" ;;
     esac
   done
 }
@@ -890,7 +991,7 @@ install_maintainer() {
   _im_ver="$(printf '%s' "$_im_entry" | cut -f1)"
   _im_url="$(printf '%s' "$_im_entry" | cut -f4)"
   _im_sha="$(printf '%s' "$_im_entry" | cut -f5)"
-  _im_dest="$HOME/.local/bin/scweb-manage"
+  _im_dest="$HOME/.local/bin/scweb"
 
   _im_state="$(maintain_state_file)"
   _im_stored=""
@@ -898,8 +999,9 @@ install_maintainer() {
     _im_stored="$(cut -f2 "$_im_state" 2>/dev/null | head -n 1)"
   fi
 
-  # 已存在且版本一致：只提示，不重复下载
+  # 已存在且版本一致：只补命令与 PATH，不重复下载
   if [ -x "$_im_dest" ] && [ "$_im_stored" = "$_im_ver" ]; then
+    register_scweb_command
     maintain_path_hint
     return 0
   fi
@@ -909,7 +1011,7 @@ install_maintainer() {
   _im_tmpdir="$(mktemp -d 2>/dev/null || echo "/tmp/scweb-manage.$$")"
   mkdir -p "$_im_tmpdir" 2>/dev/null
   TMP_DIRS="$TMP_DIRS$_im_tmpdir "
-  _im_file="$_im_tmpdir/scweb-manage"
+  _im_file="$_im_tmpdir/scweb"
   [ "$MUTE" -eq 1 ] || printf '  下载：%s\n' "$_im_url"
   if ! download_file "$_im_url" "$_im_file" || [ ! -s "$_im_file" ]; then
     note "维护程序下载失败（不影响面板使用）。"
@@ -935,18 +1037,57 @@ install_maintainer() {
   chmod 0755 "$_im_dest" 2>/dev/null || true
   mkdir -p "$(dirname "$_im_state")" 2>/dev/null
   printf '%s\t%s\t%s\n' "$_im_dest" "$_im_ver" "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" > "$_im_state" 2>/dev/null || true
-  ok "维护程序已安装：$_im_dest（命令 scweb-manage）"
+  register_scweb_command
+  ok "维护程序已安装：$_im_dest（命令 scweb）"
   maintain_path_hint
   return 0
 }
 
-# ~/.local/bin 不在 PATH 时给出持久化建议
+# 注册 scweb 命令：保留 scweb-manage 兼容名；root 或可写 /usr/local/bin 时同步到系统目录
+register_scweb_command() {
+  if [ -x "$HOME/.local/bin/scweb" ]; then
+    ln -sf "scweb" "$HOME/.local/bin/scweb-manage" 2>/dev/null || true
+    if { [ "$(id -u 2>/dev/null || echo 1000)" -eq 0 || [ -w /usr/local/bin ]; } && [ -d /usr/local/bin ]; then
+      ln -sf "$HOME/.local/bin/scweb" /usr/local/bin/scweb 2>/dev/null || true
+      ln -sf "$HOME/.local/bin/scweb" /usr/local/bin/scweb-manage 2>/dev/null || true
+    fi
+  fi
+  return 0
+}
+
+# 把 ~/.local/bin 持久化写入用户 shell 配置（幂等），保证 scweb 不需要完整路径
+ensure_local_bin_path() {
+  _elb_marker="# SCWebManager: scweb command"
+  _elb_line='case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
+  _elb_found=0
+  for _elb_rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [ -f "$_elb_rc" ] || continue
+    _elb_found=1
+    if ! grep -qF "$_elb_marker" "$_elb_rc" 2>/dev/null; then
+      printf '\n%s\n%s\n' "$_elb_marker" "$_elb_line" >> "$_elb_rc" 2>/dev/null || true
+    fi
+  done
+  if [ "$_elb_found" -eq 0 ]; then
+    printf '\n%s\n%s\n' "$_elb_marker" "$_elb_line" >> "$HOME/.profile" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# 命令可用性提示：自动写 PATH，并说明当前终端如何立即生效
 maintain_path_hint() {
+  ensure_local_bin_path
   case ":${PATH:-}:" in
-    *":$HOME/.local/bin:"*) return 0 ;;
+    *":$HOME/.local/bin:"*)
+      [ "$MUTE" -eq 1 ] || note "可直接运行命令：scweb"
+      return 0 ;;
   esac
-  note "$HOME/.local/bin 不在 PATH 中，执行以下命令后可直接使用 scweb-manage："
-  note "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+  if [ -x /usr/local/bin/scweb ]; then
+    [ "$MUTE" -eq 1 ] || note "可直接运行命令：scweb"
+    return 0
+  fi
+  [ "$MUTE" -eq 1 ] && return 0
+  note "已把 $HOME/.local/bin 写入 PATH（~/.bashrc / ~/.zshrc / ~/.profile）。"
+  note "当前终端执行 source ~/.bashrc（或重新登录）后，可直接运行：scweb"
   return 0
 }
 
@@ -1148,8 +1289,8 @@ show_success() {
   printf '  面板地址：%s\n' "$PANEL_URL"
   printf '  安装目录：%s\n' "$INSTALL_DIR"
   printf '  运行日志：%s/panel.log / daemon.log\n' "$INSTALL_DIR"
-  if [ -x "$HOME/.local/bin/scweb-manage" ]; then
-    printf '  维护工具：%s/.local/bin/scweb-manage（命令 scweb-manage）\n' "$HOME"
+  if [ -x "$HOME/.local/bin/scweb" ]; then
+    printf '  维护工具：%s/.local/bin/scweb（命令 scweb）\n' "$HOME"
   fi
   printf '\n'
   printf '  ⚠ 面板尚未配置超级用户，任何能访问该地址的人都可以创建超级用户，\n'
@@ -1184,6 +1325,10 @@ menu() {
         PANEL_URL=""
         ;;
       2)
+        if install_running "$INSTALL_DIR"; then
+          stop_panel
+          [ "$MUTE" -eq 1 ] || note "已先终止正在运行的面板进程（${STOPPED_COUNT:-0} 个）"
+        fi
         if install_version "$SELECTED_ENTRY"; then
           if start_panel; then
             install_maintainer "$SELECTED_ENTRY"
@@ -1233,6 +1378,12 @@ main() {
   select_dir
   if [ -z "$INSTALL_DIR" ]; then
     FAIL_MSG="安装目录无效"
+    return 1
+  fi
+
+  if ! resolve_install_target; then
+    FAIL_MSG="已取消安装"
+    [ "$MUTE" -eq 1 ] || printf '\n已取消安装。\n'
     return 1
   fi
 

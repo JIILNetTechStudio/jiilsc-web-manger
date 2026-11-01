@@ -193,9 +193,11 @@ function Get-InstallRecords {
             Get-ChildItem -Path $key -ErrorAction Stop | ForEach-Object {
                 $p = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
                 if ($p -and $p.Dir) {
+                    $v = [string]$p.Version
+                    if ([string]::IsNullOrWhiteSpace($v)) { $v = [string]$p.InitialVersion }
                     $out += [pscustomobject]@{
                         Dir         = [string]$p.Dir
-                        Version     = [string]$p.InitialVersion
+                        Version     = $v
                         InstalledAt = [string]$p.InstalledAt
                     }
                 }
@@ -593,6 +595,119 @@ function Select-InstallDir {
     }
     $chosen = $chosen.TrimEnd([char]92)
     return $chosen
+}
+
+# -------------------- 已安装 / 正在运行检测 --------------------
+
+# 该目录下的面板或守护进程是否正在运行（先看 runtime.json，再按可执行文件路径匹配）
+function Test-InstallRunning([string]$dir) {
+    $prefix = $dir.TrimEnd([char]92) + '\'
+    $rt = Join-Path $dir "runtime.json"
+    if (Test-Path -LiteralPath $rt) {
+        try {
+            $j = Get-Content -LiteralPath $rt -Raw -ErrorAction Stop | ConvertFrom-Json
+            if ($j.pid -and (Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue)) { return $true }
+        } catch { }
+    }
+    $found = $false
+    try {
+        Get-Process -Name scweb-panel, scweb-daemon -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = $null
+            try { $p = $_.Path } catch { }
+            if ($p -and $p.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $found = $true }
+        }
+    } catch { }
+    return $found
+}
+
+# 从安装记录里取该目录已安装的版本（取不到返回空）
+function Get-ExistingVersion([string]$dir) {
+    foreach ($it in @(Get-InstallRecords)) {
+        if ([string]::IsNullOrWhiteSpace($it.Dir)) { continue }
+        if ($it.Dir.TrimEnd([char]92) -ieq $dir.TrimEnd([char]92)) {
+            if (-not [string]::IsNullOrWhiteSpace($it.Version)) { return [string]$it.Version }
+        }
+    }
+    return ""
+}
+
+# 选定目录后处理两种情况：
+#   1) 该目录的面板正在运行：必须终止后才能重新安装；
+#   2) 该目录已有面板但未运行：让用户选择覆盖安装（保留配置/数据）或另选目录全新安装。
+# 返回最终安装目录；返回 $null 表示用户取消。
+function Resolve-InstallTarget([string]$dir) {
+    while ($true) {
+        if (Test-InstallRunning $dir) {
+            Write-Bad "检测到该目录下的 SCWebManager 正在运行：$dir"
+            Write-Note "面板正在运行，必须先终止进程才能进行重新安装。"
+            if ($script:Mute) {
+                [void](Stop-PanelProcesses $dir)
+                Write-Note "静默模式：已终止正在运行的进程"
+            } else {
+                Write-Line "   1) 终止正在运行的进程并继续安装"
+                Write-Line "   0) 取消并退出安装器"
+                $a = Read-Host "  请输入 1 / 0（直接回车 = 0）"
+                if ($null -eq $a) { $a = "" }
+                $a = $a.Trim()
+                if ($a -eq "" -or $a -eq "0") {
+                    Write-Note "已取消：请先通过维护工具或任务管理器停止面板后再安装。"
+                    return $null
+                }
+                if ($a -ne "1") {
+                    Write-Bad "输入无效：$a"
+                    continue
+                }
+                $n = Stop-PanelProcesses $dir
+                Write-Ok "已终止 $n 个进程"
+                Start-Sleep -Milliseconds 600
+                if (Test-InstallRunning $dir) {
+                    Write-Bad "进程仍未退出，请稍后重试或手动结束进程后再安装。"
+                    return $null
+                }
+            }
+            # 用户已明确选择终止后重新安装，直接沿用该目录（覆盖安装）
+            return $dir
+        }
+
+        $panelExe = Join-Path $dir "scweb-panel.exe"
+        if (-not (Test-Path -LiteralPath $panelExe)) { return $dir }
+
+        $ver = Get-ExistingVersion $dir
+        if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "未知" }
+        Write-Bad "该目录下已存在 SCWebManager（版本 $ver）：$dir"
+        if ($script:Mute) {
+            Write-Note "静默模式：按覆盖安装继续（保留配置与数据）"
+            return $dir
+        }
+        Write-Line "   1) 覆盖安装（修复当前实例：替换程序文件，保留配置与数据）"
+        Write-Line "   2) 全新安装（另选一个目录，新增实例，不影响当前实例）"
+        Write-Line "   0) 取消并退出安装器"
+        $a = Read-Host "  请输入 1 / 2 / 0（直接回车 = 1）"
+        if ($null -eq $a) { $a = "" }
+        $a = $a.Trim()
+        switch ($a) {
+            { $_ -eq "" -or $_ -eq "1" } {
+                Write-Line "  继续使用该目录（覆盖安装）" Green
+                return $dir
+            }
+            "2" {
+                $newDir = Select-InstallDir
+                if ([string]::IsNullOrWhiteSpace($newDir)) {
+                    Write-Note "未选择新目录，已取消安装。"
+                    return $null
+                }
+                $dir = $newDir
+            }
+            "0" {
+                Write-Note "已取消安装。"
+                return $null
+            }
+            default {
+                Write-Bad "输入无效：$a"
+                Write-Note "请输入 1、2 或 0，直接回车执行覆盖安装"
+            }
+        }
+    }
 }
 
 # 打开 Windows 文件管理器目录选择框；不可用或取消时返回空串
@@ -1188,6 +1303,8 @@ function Show-Menu($entry, $dir) {
             continue
         } elseif ($c -eq "2") {
             Write-Host ""
+            $n = Stop-PanelProcesses $dir
+            if ($n -gt 0) { Write-Note "已先终止正在运行的面板进程（$n 个）" }
             if (Install-Version $entry $dir) {
                 if (Start-PanelWithRetry $dir $entry) {
                     Write-InstallRecord $dir ([string]$entry.version)
@@ -1220,6 +1337,11 @@ function Main {
     $dir = Select-InstallDir
     if ([string]::IsNullOrWhiteSpace($dir)) {
         $script:FailMsg = "安装目录无效"
+        return $false
+    }
+    $dir = Resolve-InstallTarget $dir
+    if ([string]::IsNullOrWhiteSpace($dir)) {
+        $script:FailMsg = "已取消安装"
         return $false
     }
     $script:InstallDir = $dir
