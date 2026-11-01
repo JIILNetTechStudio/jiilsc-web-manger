@@ -609,6 +609,29 @@ confirm_install() {
   done
 }
 
+# 发行版渠道：Gitee 发布时可勾选「预览版（pre-release）」，这里查仓库的
+# release 详情接口确认该版本是不是预览版。查不到（离线/接口限流/版本不存在）
+# 就按正式版处理，静默跳过，不影响安装。
+is_prerelease() {
+  _ip_ver="$1"
+  [ -n "$_ip_ver" ] || return 1
+  _ip_body="$(curl -fsSL --max-time 10 "https://gitee.com/api/v5/repos/JIILStudio/jiilsc-web-manger/releases/tags/${_ip_ver}" 2>/dev/null || true)"
+  [ -n "$_ip_body" ] || return 1
+  printf '%s' "$_ip_body" | grep -Eq '"prerelease"[[:space:]]*:[[:space:]]*true'
+}
+
+# 预览版提示（正式版不输出任何内容；-json/静默模式不输出）
+warn_prerelease() {
+  _wp_ver="$1"
+  is_prerelease "$_wp_ver" || return 0
+  [ "$MUTE" -eq 1 ] && return 0
+  sep
+  note "当前版本 ${_wp_ver} 为预览版（pre-release）"
+  note "预览版用于提前体验新功能，可能不稳定、功能缺失或出现数据异常"
+  note "生产环境建议改用正式版：发布页中未标记「预览」的版本"
+  sep
+}
+
 find_entry() {
   _fe_v="$1"
   sort_entries "$ENTRIES_FILE" | awk -F'\t' -v v="$_fe_v" '$1 == v { print; exit }'
@@ -1136,6 +1159,7 @@ main() {
     return 1
   fi
   RESULT_VERSION="$(printf '%s' "$SELECTED_ENTRY" | cut -f1)"
+  warn_prerelease "$RESULT_VERSION"
 
   if ! install_with_retry "$SELECTED_ENTRY"; then
     FAIL_MSG="安装失败（下载或写入失败）"

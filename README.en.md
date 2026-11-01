@@ -1,23 +1,79 @@
 # SCWebManager
 
-A one-stop management panel for Survivalcraft servers, developed and maintained by **JIILNetTechStudio**.
+A browser-based management panel for Survivalcraft servers, developed and maintained by **JIILNetTechStudio**.
 
 > **This repository is for distribution only**: it hosts installer scripts, the version manifest and release downloads.
 > The product source code is not public and is not included here.
 > Copyright © JIILNetTechStudio. All rights reserved. Copying, redistributing, reverse engineering or any commercial use without written permission is prohibited.
 
+Out of the box: create an instance → start the server → watch the console → manage players and inventories → view the world map → install mods and edit configs → set permissions and scheduled jobs. Everything runs in the browser — no client to install.
+
 ---
 
-## Features
+## Highlights
 
-- Instance management: start / stop / restart, memory watchdog and auto-restart, online config editing
-- Player management: online and offline lists, attributes, inventory viewer and editor, chat and join/leave history
-- Map: world render viewer, player markers, movement trails with time travel
-- Files and mods: online file manager, mod upload and versioning, one-click updates
-- Console: live log stream, command execution, command history
-- Scheduled tasks: cron syntax, command / script jobs with audit trail
-- AI assistant: multiple model providers, tool calling with tiered approval, per-conversation rollback
-- Security: login protection, RBAC permission groups, audit log, network self-check
+1. **Deep in-game plugin integration**
+   The panel installs the in-game plugin automatically with each instance (it only overwrites the DLL, never your config). Online players, inventories, world data and TPS all come from the plugin in real time. If the plugin is missing, the panel says so and offers a one-click install instead of showing empty pages.
+
+2. **Visual inventory editor**
+   Survival and creative inventories (including the clothing slots) are shown slot by slot with validation of quantity and slot rules (clothing slots cannot be swapped with backpack slots). Saving writes straight back to the instance; bulk clearing is supported.
+
+3. **World map rendering with player trails**
+   The panel parses save Region files and renders a top-down PNG map with player markers; clicking a marker shows that player's trail and lets you center or teleport.
+
+4. **Multiple instances and container migration**
+   One panel manages many instances, and the instance root can be moved to another disk. Migration is lock-guarded (stop → copy → remove old → update record) so nothing is copied twice or deleted by accident.
+
+5. **Event-driven scheduled jobs**
+   Besides cron syntax, jobs can react to instance start / stop / crash, TPS below a threshold, or file changes. An "AI job" type runs a prompt unattended on schedule. JSON import/export, per-run timeout, elevated execution and trigger cooldown are supported.
+
+6. **AI assistant with approval and audit**
+   Multiple model providers, risk-tiered tool calls (dangerous commands are hard-rejected, unknown ones need approval), rollback of each round's changes, full audit trail, and an isolated workspace that never touches instance directories.
+
+7. **SCKey unified login**
+   Players are verified through SCKey before joining, filtering out alt accounts and pirated clients. A three-step wizard binds the instance and writes only the required config fields, leaving existing settings untouched.
+
+8. **Notification guardian**
+   Instance crashes, daemon disconnects and CPU / memory / disk threshold breaches can be pushed via SMTP email or Webhook. Even with notifications off, incidents are recorded in the audit log and panel log and surfaced the next time you open the page.
+
+9. **Whole-package auto update**
+   Panel, daemon and updater upgrade together: the package is downloaded and verified, a pending-update flag is set, and the daemon launches the updater only when **all instances are stopped**, then restarts the panel — online players are not interrupted.
+
+10. **Fine-grained permissions**
+    Groups plus menu-level permissions plus per-instance grants (console, files, backup, resource limits and instance settings are granted separately). File access has three tiers — instance-only, whole-disk read, whole-disk read/write — and regular users only see the instances assigned to them.
+
+11. **Three ways to edit configs**
+    JSON and other config files can be edited as key/value forms, as a tree view, or as raw source. GBK / UTF-8 is detected automatically, so Chinese text never turns into mojibake.
+
+12. **Terminal and quick commands**
+    Real shell sessions on the host (PowerShell / CMD on Windows, bash on Linux) persist while the panel runs; the console supports preset quick commands sent with one click.
+
+13. **Resource limits and performance charts**
+    Per-instance CPU / memory thresholds with an over-limit strategy, plus live TPS and performance charts on the dashboard.
+
+14. **Three backup layers**
+    World backups, whole-instance zip backups (custom destination supported) and instance cloning — quick recovery after a bad change.
+
+## Modules
+
+| Module | Capabilities |
+| --- | --- |
+| Dashboard | Instance status, TPS and performance charts, online players, world summary |
+| Instances | Create / import / install server, start / stop / restart, console commands |
+| Players | Online and offline lists, attributes, visual inventory editing, chat and join/leave history |
+| World and map | Region-rendered map, player markers and trails, teleport, world editing |
+| Mods | `.netmod` upload, install / uninstall, version detection, NetMods management |
+| Files | Browse / upload / download / edit, three access tiers, three editing modes |
+| Console | Live log stream, customizable color rules, quick commands |
+| Terminal | Multi-session host shell with highlighted output |
+| Scheduled jobs | cron, event triggers, AI jobs, JSON import/export, run logs |
+| Backup | World backup, whole-instance backup, instance clone |
+| Notification guardian | Crash / disconnect / resource alerts via email and Webhook |
+| SCKey login | Player verification, wizard binding, rebind and unbind |
+| AI assistant | Multi-model, tool calls with approval, rollback, audit, isolated workspace |
+| Users and permissions | Super admin / admin / regular user, groups, permissions, instance grants |
+| Audit | Logins, permission changes, dangerous operations and AI activity |
+| Settings | Port, site title, log retention, highlight rules, UI scale, languages (Chinese / English / Traditional Chinese) |
 
 ## Supported platforms
 
@@ -74,14 +130,20 @@ sha256sum -c SHA256SUMS
 | `versions.json` | Version manifest used by installers |
 | `version.json` | Update manifest used by the panel |
 | `true-list.json` | Minimum OS version requirements |
+| `gg.txt` | Announcement text fetched by the panel |
+| `ver-pp.json` | Server version presets (one-click install and architecture hints) |
 
 ## Updates
 
-The panel can check for and install updates from its settings page. The correct package for the current platform is downloaded, verified, and applied by the daemon when all server instances are stopped.
+The panel checks for updates after login and from Settings → Update. Updates are whole-package: the correct build for the current platform is downloaded and verified, then the daemon replaces all three binaries and restarts the panel once every instance is stopped.
 
 ## Feedback
 
-Please open an issue with your OS version, CPU architecture, installation method and any related log (`data/startup-error.log`, `panel.err.log`).
+- Community: QQ group **750395354** (mention SCWebManager when joining)
+- Forum: <https://bbs.jiil.top>
+- Email: <support@jiil.top>
+
+Please include your OS version, CPU architecture, installation method, panel version and any related logs (`data/startup-error.log`, `panel.err.log`).
 
 ---
 

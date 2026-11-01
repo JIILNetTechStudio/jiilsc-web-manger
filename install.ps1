@@ -651,6 +651,29 @@ function Select-Version($cfg) {
     }
 }
 
+# 发行版渠道：Gitee 发布时可勾选「预览版（pre-release）」，这里查仓库的
+# release 详情接口确认该版本是不是预览版。查不到（离线/接口限流/版本不存在）
+# 就按正式版处理，静默跳过，不影响安装。
+function Test-Prerelease([string]$ver) {
+    if ([string]::IsNullOrWhiteSpace($ver)) { return $false }
+    $api = "https://gitee.com/api/v5/repos/JIILStudio/jiilsc-web-manger/releases/tags/$ver"
+    try {
+        $resp = Invoke-WebRequest -UseBasicParsing -Uri $api -TimeoutSec 10 -ErrorAction Stop
+        if ($resp.StatusCode -ne 200) { return $false }
+        return [bool]($resp.Content | ConvertFrom-Json).prerelease
+    } catch { return $false }
+}
+
+# 预览版提示（正式版不输出任何内容）
+function Write-ReleaseChannel([string]$ver) {
+    if (-not (Test-Prerelease $ver)) { return }
+    Write-Line ""
+    Write-Line "  ! 当前版本 $ver 为预览版（pre-release）" Yellow
+    Write-Line "    预览版用于提前体验新功能，可能不稳定、功能缺失或出现数据异常。" Yellow
+    Write-Line "    生产环境建议改用正式版：发布页中未标记「预览」的版本。" Yellow
+    Write-Line ""
+}
+
 # ---------------------------- 下载安装 ----------------------------
 
 function Install-FailResult($reason) { return [pscustomobject]@{ Ok = $false; Reason = $reason } }
@@ -1105,6 +1128,7 @@ function Main {
         return $false
     }
     $script:ResultVersion = [string]$entry.version
+    Write-ReleaseChannel $script:ResultVersion
 
     if (-not (Install-Version $entry $dir)) {
         $script:FailMsg = "安装失败（下载或写入失败）"
