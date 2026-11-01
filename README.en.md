@@ -54,6 +54,12 @@ Out of the box: create an instance → start the server → watch the console �
 14. **Three backup layers**
     World backups, whole-instance zip backups (custom destination supported) and instance cloning — quick recovery after a bad change.
 
+15. **Standalone maintenance tool (scweb-manage)**
+    Installed by the setup script, one copy per machine: desktop and Start Menu shortcuts on Windows, a `~/.local/bin/scweb-manage` command on Linux. Menu actions: start the panel, view autostart state, repair (replace program files, keep config and data), fresh install (adds an instance without touching existing ones), uninstall, check for updates (custom version with validation and pre-release warnings), and set an alias. With multiple panels it first lists each instance's directory, version and install time.
+
+16. **Unified install registry and HTTPS**
+    Setup scripts, panels and the maintenance tool share one install registry (Windows registry / Linux config file), and the panel syncs the version after updates. The panel lists all local panel instances and can set aliases. The settings page accepts PEM certificate and private key plus the bound domain; if the certificate is missing, expired or does not match the domain, the panel falls back to HTTP at startup instead of failing to open.
+
 ## Modules
 
 | Module | Capabilities |
@@ -73,7 +79,8 @@ Out of the box: create an instance → start the server → watch the console �
 | AI assistant | Multi-model, tool calls with approval, rollback, audit, isolated workspace |
 | Users and permissions | Super admin / admin / regular user, groups, permissions, instance grants |
 | Audit | Logins, permission changes, dangerous operations and AI activity |
-| Settings | Port, site title, log retention, highlight rules, UI scale, languages (Chinese / English / Traditional Chinese) |
+| Settings | Port, bind address, site title, access scope, log retention, highlight rules, HTTPS certificate, plugin site address, panel instance list and aliases, UI scale, languages (Chinese / English / Traditional Chinese) |
+| Maintenance tool | `scweb-manage`: start, autostart state, repair, fresh install, uninstall, check updates, set alias |
 
 ## Supported platforms
 
@@ -100,6 +107,8 @@ curl -fsSL https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/install.sh 
 
 The installer detects the CPU architecture, asks where to install, then starts the daemon and panel and prints the access URL and initial administrator credentials.
 
+It also installs the maintenance tool `scweb-manage`: on Windows at `%LOCALAPPDATA%\SCWebManager\scweb-manage.exe` with desktop and Start Menu shortcuts; on Linux at `~/.local/bin/scweb-manage` (a PATH hint is printed when needed).
+
 Optional arguments: `-1 <dir>` install directory, `-2 <version>`, `-f` silent install, `-json` machine-readable result.
 
 ## Manual installation
@@ -114,7 +123,7 @@ Optional arguments: `-1 <dir>` install directory, `-2 <version>`, `-f` silent in
 `SHA256SUMS` in each release lists the SHA-256 of every package. It is a text file, not a program.
 
 ```powershell
-Get-FileHash .\scweb-1.5.8-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\scweb-1.5.9-windows-amd64.zip -Algorithm SHA256
 ```
 
 ```bash

@@ -54,6 +54,12 @@
 14. **三层备份体系**
     世界备份、整实例目录 zip 总备份（可自定义备份目录）、实例克隆，误操作后可快速回到正常状态。
 
+15. **独立维护工具（scweb-manage）**
+    随安装脚本落地、全机只保留一份：Windows 在桌面与开始菜单创建快捷方式，Linux 注册为 `~/.local/bin/scweb-manage` 命令。菜单式操作：启动面板、查看自启动状态、修复安装（替换程序文件但保留配置与数据）、全新安装（新增实例，不影响已有）、卸载、检查更新（支持指定版本并校验、预览版额外提示）、设置别名。多面板时先列出各实例的目录 / 版本 / 安装时间让你选择。
+
+16. **统一安装清单与 HTTPS**
+    安装脚本、面板、维护工具共用一份安装清单（Windows 注册表 / Linux 配置文件），面板更新后自动同步版本；面板内可查看全部面板实例并设置别名。设置页可直接填写 PEM 证书与私钥并绑定域名，证书缺失、过期或域名不匹配时面板启动自动降级为 HTTP，不会因证书问题打不开。
+
 ## 功能模块
 
 | 模块 | 能力 |
@@ -73,7 +79,8 @@
 | AI 助手 | 多模型、工具调用与审批、改动回滚、审计、独立工作区 |
 | 用户与权限 | 超级管理员 / 管理员 / 普通用户、用户组、权限项、实例授权 |
 | 审计 | 登录、权限变更、危险操作与 AI 行为留痕 |
-| 面板设置 | 端口、站点标题、日志保留、高亮规则、界面缩放、多语言（中 / 英 / 繁体） |
+| 面板设置 | 端口、监听地址、站点标题、访问范围、日志保留、高亮规则、HTTPS 证书、插件站地址、面板实例列表与别名、界面缩放、多语言（中 / 英 / 繁体） |
+| 维护工具 | `scweb-manage`：启动、自启动状态、修复安装、全新安装、卸载、检查更新、设置别名 |
 
 ## 支持平台
 
@@ -100,6 +107,8 @@ curl -fsSL https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/install.sh 
 
 安装脚本会自动识别本机 CPU 架构并选择对应安装包，安装过程中可选择目录（默认 / 手动输入 / 文件管理器选择），完成后自动启动守护进程与面板，并输出访问地址与初始管理员账号。
 
+安装完成后会同时落地维护工具 `scweb-manage`：Windows 位于 `%LOCALAPPDATA%\SCWebManager\scweb-manage.exe` 并创建桌面与开始菜单快捷方式；Linux 位于 `~/.local/bin/scweb-manage`（若该目录不在 PATH 中会给出配置提示）。
+
 安装参数（可选）：
 
 | 参数 | 说明 |
@@ -122,7 +131,7 @@ curl -fsSL https://gitee.com/JIILStudio/jiilsc-web-manger/raw/master/install.sh 
 
 ```powershell
 # Windows
-Get-FileHash .\scweb-1.5.8-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\scweb-1.5.9-windows-amd64.zip -Algorithm SHA256
 ```
 
 ```bash

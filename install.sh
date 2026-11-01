@@ -551,9 +551,10 @@ load_versions() {
   return 1
 }
 
-# 把 JSON 里的版本对象转成 "version<TAB>url<TAB>sha256" 行。
+# 把 JSON 里的版本对象转成 "version<TAB>url<TAB>sha256<TAB>manage_url<TAB>manage_sha256" 行。
 # 按当前机器架构取包：优先 "linux_<arch>" 与 "linux_<arch>_sha256"；
 # amd64 机器仍兼容旧清单的单字段 "linux"（历史版本只有 x86_64 包）。
+# 维护程序（scweb-manage）同理取 "manage_linux_<arch>"，旧清单没有该字段时留空。
 # 注意：清单要求每个版本对象独占一行（awk 按 } 切分）。
 parse_versions() {
   _pv_json="$1"
@@ -569,17 +570,22 @@ parse_versions() {
         [ -n "$_v" ] || continue
         _l=""
         _s=""
+        _mu=""
+        _ms=""
         if [ -n "${ARCH_KIND:-}" ]; then
           _l="$(printf '%s' "$_line" | sed -n "s/.*\"linux_${ARCH_KIND}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")"
           _s="$(printf '%s' "$_line" | sed -n "s/.*\"linux_${ARCH_KIND}_sha256\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")"
+          _mu="$(printf '%s' "$_line" | sed -n "s/.*\"manage_linux_${ARCH_KIND}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")"
+          _ms="$(printf '%s' "$_line" | sed -n "s/.*\"manage_linux_${ARCH_KIND}_sha256\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")"
         fi
         if [ -z "$_l" ] && [ "${ARCH_KIND:-}" = "amd64" ]; then
           _l="$(printf '%s' "$_line" | sed -n 's/.*"linux"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
           _s="$(printf '%s' "$_line" | sed -n 's/.*"linux_sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
           [ -n "$_s" ] || _s="$(printf '%s' "$_line" | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+          [ -n "$_mu" ] || _mu="$(printf '%s' "$_line" | sed -n 's/.*"manage_linux"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
         fi
         [ -n "$_l" ] || continue
-        printf '%s\t%s\t%s\n' "$_v" "$_l" "$_s" >> "$_pv_out"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$_v" "$_l" "$_s" "$_mu" "$_ms" >> "$_pv_out"
       done
 }
 
@@ -655,6 +661,7 @@ select_version() {
         return 1
       fi
       [ "$MUTE" -eq 1 ] || printf '  最新版本：%s\n' "$LATEST_VERSION"
+      warn_prerelease "$LATEST_VERSION"
       SELECTED_ENTRY="$_entry"
       return 0
     fi
@@ -663,6 +670,7 @@ select_version() {
       FAIL_MSG="版本 $_sv_pre 不在版本列表中"
       return 1
     fi
+    warn_prerelease "$_sv_pre"
     SELECTED_ENTRY="$_entry"
     return 0
   fi
@@ -687,6 +695,7 @@ select_version() {
           continue
         fi
         printf '  最新版本：%s\n' "$LATEST_VERSION"
+        warn_prerelease "$LATEST_VERSION"
         if confirm_install; then
           SELECTED_ENTRY="$_entry"
           return 0
@@ -699,6 +708,7 @@ select_version() {
           if [ "$_v" = "0" ]; then break; fi
           _entry="$(find_entry "$_v")"
           if [ -n "$_entry" ]; then
+            warn_prerelease "$_v"
             SELECTED_ENTRY="$_entry"
             return 0
           fi
@@ -862,6 +872,81 @@ install_version() {
   fi
 
   ok "已安装到 $INSTALL_DIR"
+  return 0
+}
+
+# ---------------------------- 维护程序（scweb-manage） ----------------------------
+# 全机只安装一份：$HOME/.local/bin/scweb-manage；记录写到
+# ${XDG_CONFIG_HOME:-$HOME/.config}/scweb/maintenance（路径/版本/安装时间）。
+# 面板可以在多个目录各装一份，但维护程序始终复用同一份。
+
+maintain_state_file() {
+  _ms_dir="${XDG_CONFIG_HOME:-$HOME/.config}/scweb"
+  printf '%s/maintenance' "$_ms_dir"
+}
+
+install_maintainer() {
+  _im_entry="$1"
+  _im_ver="$(printf '%s' "$_im_entry" | cut -f1)"
+  _im_url="$(printf '%s' "$_im_entry" | cut -f4)"
+  _im_sha="$(printf '%s' "$_im_entry" | cut -f5)"
+  _im_dest="$HOME/.local/bin/scweb-manage"
+
+  _im_state="$(maintain_state_file)"
+  _im_stored=""
+  if [ -f "$_im_state" ]; then
+    _im_stored="$(cut -f2 "$_im_state" 2>/dev/null | head -n 1)"
+  fi
+
+  # 已存在且版本一致：只提示，不重复下载
+  if [ -x "$_im_dest" ] && [ "$_im_stored" = "$_im_ver" ]; then
+    maintain_path_hint
+    return 0
+  fi
+  [ -n "$_im_url" ] || { note "该版本未提供维护程序，跳过安装（不影响面板使用）。"; return 0; }
+
+  step "安装维护程序"
+  _im_tmpdir="$(mktemp -d 2>/dev/null || echo "/tmp/scweb-manage.$$")"
+  mkdir -p "$_im_tmpdir" 2>/dev/null
+  TMP_DIRS="$TMP_DIRS$_im_tmpdir "
+  _im_file="$_im_tmpdir/scweb-manage"
+  [ "$MUTE" -eq 1 ] || printf '  下载：%s\n' "$_im_url"
+  if ! download_file "$_im_url" "$_im_file" || [ ! -s "$_im_file" ]; then
+    note "维护程序下载失败（不影响面板使用）。"
+    return 0
+  fi
+  if [ -n "$_im_sha" ]; then
+    _im_hash=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      _im_hash="$(sha256sum "$_im_file" 2>/dev/null | cut -d ' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+      _im_hash="$(shasum -a 256 "$_im_file" 2>/dev/null | cut -d ' ' -f1)"
+    fi
+    if [ -n "$_im_hash" ] && [ "$_im_hash" != "$(printf '%s' "$_im_sha" | tr 'A-Z' 'a-z')" ]; then
+      note "维护程序校验失败（SHA256 不一致），已跳过。"
+      return 0
+    fi
+  fi
+  mkdir -p "$HOME/.local/bin" 2>/dev/null
+  if ! cp -f "$_im_file" "$_im_dest" 2>/dev/null; then
+    note "维护程序写入失败：$_im_dest"
+    return 0
+  fi
+  chmod 0755 "$_im_dest" 2>/dev/null || true
+  mkdir -p "$(dirname "$_im_state")" 2>/dev/null
+  printf '%s\t%s\t%s\n' "$_im_dest" "$_im_ver" "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" > "$_im_state" 2>/dev/null || true
+  ok "维护程序已安装：$_im_dest（命令 scweb-manage）"
+  maintain_path_hint
+  return 0
+}
+
+# ~/.local/bin 不在 PATH 时给出持久化建议
+maintain_path_hint() {
+  case ":${PATH:-}:" in
+    *":$HOME/.local/bin:"*) return 0 ;;
+  esac
+  note "$HOME/.local/bin 不在 PATH 中，执行以下命令后可直接使用 scweb-manage："
+  note "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
   return 0
 }
 
@@ -1063,6 +1148,9 @@ show_success() {
   printf '  面板地址：%s\n' "$PANEL_URL"
   printf '  安装目录：%s\n' "$INSTALL_DIR"
   printf '  运行日志：%s/panel.log / daemon.log\n' "$INSTALL_DIR"
+  if [ -x "$HOME/.local/bin/scweb-manage" ]; then
+    printf '  维护工具：%s/.local/bin/scweb-manage（命令 scweb-manage）\n' "$HOME"
+  fi
   printf '\n'
   printf '  ⚠ 面板尚未配置超级用户，任何能访问该地址的人都可以创建超级用户，\n'
   printf '    请立即访问并设置密码。\n'
@@ -1098,6 +1186,7 @@ menu() {
       2)
         if install_version "$SELECTED_ENTRY"; then
           if start_panel; then
+            install_maintainer "$SELECTED_ENTRY"
             show_success
           else
             bad "重新启动失败，请查看 $INSTALL_DIR/panel.log"
@@ -1159,7 +1248,6 @@ main() {
     return 1
   fi
   RESULT_VERSION="$(printf '%s' "$SELECTED_ENTRY" | cut -f1)"
-  warn_prerelease "$RESULT_VERSION"
 
   if ! install_with_retry "$SELECTED_ENTRY"; then
     FAIL_MSG="安装失败（下载或写入失败）"
@@ -1174,6 +1262,7 @@ main() {
   fi
 
   record_install
+  install_maintainer "$SELECTED_ENTRY"
   show_success
   # 静默/JSON 模式不进入驻留菜单
   [ "$MUTE" -eq 1 ] && return 0

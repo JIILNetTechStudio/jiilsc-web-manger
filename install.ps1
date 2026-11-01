@@ -230,14 +230,121 @@ function Write-InstallRecord([string]$dir, [string]$version) {
         if (-not $exists) {
             New-Item -Path $key -Force | Out-Null
             Set-ItemProperty -Path $key -Name "Dir" -Value $dir
+            Set-ItemProperty -Path $key -Name "Version" -Value $version
             Set-ItemProperty -Path $key -Name "InitialVersion" -Value $version
             Set-ItemProperty -Path $key -Name "InstalledAt" -Value (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
             Set-ItemProperty -Path $key -Name "Arch" -Value ("windows-" + (Get-ArchKind))
         } else {
             Set-ItemProperty -Path $key -Name "Dir" -Value $dir
+            Set-ItemProperty -Path $key -Name "Version" -Value $version
         }
     } catch {
         Write-Note "写入安装记录失败（不影响使用）：$($_.Exception.Message)"
+    }
+}
+
+# -------------------- 维护程序（scweb-manage） --------------------
+# 全机只安装一份：固定放在 %LOCALAPPDATA%\SCWebManager\scweb-manage.exe，
+# 并在桌面与开始菜单注册快捷方式；注册信息写在 HKCU\Software\SCWebManager\Maintenance
+# （Path / Version / InstalledAt）。面板本体可以在多个目录各装一份，但维护程序只有一份。
+
+$script:MaintainDir = Join-Path $env:LOCALAPPDATA "SCWebManager"
+$script:MaintainExe = Join-Path $script:MaintainDir "scweb-manage.exe"
+
+function Get-MaintainerVersion {
+    try {
+        $k = Join-Path $script:RegRoot "Maintenance"
+        if (Test-Path $k) {
+            $p = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+            if ($p -and $p.Version) { return [string]$p.Version }
+        }
+    } catch { }
+    return ""
+}
+
+# 在桌面与开始菜单创建快捷方式（重复执行会覆盖同名快捷方式）
+function Register-MaintainerShortcut {
+    try {
+        if (-not (Test-Path -LiteralPath $script:MaintainExe)) { return }
+        $ws = New-Object -ComObject WScript.Shell
+        $desktop = ""
+        try { $desktop = [Environment]::GetFolderPath("Desktop") } catch { }
+        $programs = ""
+        try { $programs = [Environment]::GetFolderPath("Programs") } catch { }
+
+        $targets = @()
+        if (-not [string]::IsNullOrWhiteSpace($desktop)) {
+            $targets += (Join-Path $desktop "SCWebManager 维护工具.lnk")
+        }
+        if (-not [string]::IsNullOrWhiteSpace($programs)) {
+            $smDir = Join-Path $programs "SCWebManager"
+            try { New-Item -ItemType Directory -Force -Path $smDir | Out-Null } catch { }
+            $targets += (Join-Path $smDir "SCWebManager 维护工具.lnk")
+        }
+        foreach ($lnk in $targets) {
+            try {
+                $sc = $ws.CreateShortcut($lnk)
+                $sc.TargetPath = $script:MaintainExe
+                $sc.WorkingDirectory = $script:MaintainDir
+                $sc.Description = "SCWebManager 面板维护工具（启动/修复/更新/卸载/别名）"
+                $sc.Save()
+            } catch { }
+        }
+    } catch { }
+}
+
+# 安装/更新维护程序（失败只提示，不影响面板安装）
+function Install-Maintainer($entry) {
+    try {
+        $archKind = Get-ArchKind
+        if ([string]::IsNullOrWhiteSpace($archKind)) { return }
+        $ver = [string]$entry.version
+        $url = Get-EntryField $entry ("manage_windows_" + $archKind)
+        $sha = Get-EntryField $entry ("manage_windows_" + $archKind + "_sha256")
+
+        # 已存在且版本一致：只补建快捷方式，不重复下载
+        if ((Test-Path -LiteralPath $script:MaintainExe) -and ((Get-MaintainerVersion) -eq $ver)) {
+            Register-MaintainerShortcut
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($url)) {
+            Write-Note "该版本未提供维护程序，跳过安装（不影响面板使用）。"
+            return
+        }
+
+        Write-Step "安装维护程序"
+        New-Item -ItemType Directory -Force -Path $script:MaintainDir | Out-Null
+        $tmp = Join-Path $env:TEMP ("scweb-manage-" + [guid]::NewGuid().ToString("N") + ".exe")
+        $script:TmpPaths += $tmp
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 60
+        } catch {
+            Write-Note "维护程序下载失败（不影响面板使用）：$($_.Exception.Message)"
+            return
+        }
+        if (-not [string]::IsNullOrWhiteSpace($sha)) {
+            try {
+                $got = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
+                if ($got -ne $sha.Trim().ToLower()) {
+                    Write-Note "维护程序校验失败（SHA256 不一致），已跳过。"
+                    return
+                }
+            } catch { }
+        }
+        Copy-Item -LiteralPath $tmp -Destination $script:MaintainExe -Force
+        try { Unblock-File -LiteralPath $script:MaintainExe -ErrorAction SilentlyContinue } catch { }
+
+        if (-not (Test-Path $script:RegRoot)) { New-Item -Path $script:RegRoot -Force | Out-Null }
+        $mk = Join-Path $script:RegRoot "Maintenance"
+        New-Item -Path $mk -Force | Out-Null
+        Set-ItemProperty -Path $mk -Name "Path" -Value $script:MaintainExe
+        Set-ItemProperty -Path $mk -Name "Version" -Value $ver
+        Set-ItemProperty -Path $mk -Name "InstalledAt" -Value (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
+
+        Register-MaintainerShortcut
+        Write-Ok "维护程序已安装：$script:MaintainExe（桌面与开始菜单已创建快捷方式）"
+    } catch {
+        Write-Note "维护程序安装出错（不影响面板使用）：$($_.Exception.Message)"
     }
 }
 
@@ -600,10 +707,11 @@ function Select-Version($cfg) {
                 return $null
             }
             Write-Line "  最新版本：$latest" Green
+            Write-ReleaseChannel $latest
             return $entry
         }
         $entry = $list | Where-Object { [string]$_.version -eq $pre } | Select-Object -First 1
-        if ($entry) { return $entry }
+        if ($entry) { Write-ReleaseChannel ([string]$entry.version); return $entry }
         $script:FailMsg = "版本 $pre 不在版本列表中"
         return $null
     }
@@ -624,6 +732,7 @@ function Select-Version($cfg) {
                 continue
             }
             Write-Host "  最新版本：$latest" -ForegroundColor Green
+            Write-ReleaseChannel $latest
             if (Confirm-Yes) { return $entry }
             continue
         } elseif ($c -eq "0") {
@@ -633,7 +742,7 @@ function Select-Version($cfg) {
                 $v = $v.Trim()
                 if ($v -eq "0") { break }
                 $entry = $list | Where-Object { [string]$_.version -eq $v } | Select-Object -First 1
-                if ($entry) { return $entry }
+                if ($entry) { Write-ReleaseChannel $v; return $entry }
                 Write-Bad "版本 $v 不在列表中，请重新输入"
             }
             continue
@@ -1036,6 +1145,9 @@ function Show-Success($dir) {
     Write-Host "  面板地址：$script:PanelUrl" -ForegroundColor Cyan
     Write-Host "  安装目录：$dir"
     Write-Host "  运行日志：$dir\panel.log / daemon.log"
+    if (Test-Path -LiteralPath $script:MaintainExe) {
+        Write-Host "  维护工具：$script:MaintainExe（桌面 / 开始菜单快捷方式）" -ForegroundColor Cyan
+    }
     Write-Host ""
     Write-Host "  ⚠ 面板尚未配置超级用户，任何能访问该地址的人都可以创建超级用户，" -ForegroundColor Yellow
     Write-Host "    请立即访问并设置密码。" -ForegroundColor Yellow
@@ -1079,6 +1191,7 @@ function Show-Menu($entry, $dir) {
             if (Install-Version $entry $dir) {
                 if (Start-PanelWithRetry $dir $entry) {
                     Write-InstallRecord $dir ([string]$entry.version)
+                    Install-Maintainer $entry
                     Show-Success $dir
                 } else { Write-Bad "重新启动失败，请查看 $dir\panel.err.log" }
             } else {
@@ -1128,7 +1241,6 @@ function Main {
         return $false
     }
     $script:ResultVersion = [string]$entry.version
-    Write-ReleaseChannel $script:ResultVersion
 
     if (-not (Install-Version $entry $dir)) {
         $script:FailMsg = "安装失败（下载或写入失败）"
@@ -1146,6 +1258,7 @@ function Main {
     }
 
     Write-InstallRecord $dir $script:ResultVersion
+    Install-Maintainer $entry
     Show-Success $dir
     # 静默/JSON 模式不进入驻留菜单
     if (-not $script:Mute) { Show-Menu $entry $dir }
