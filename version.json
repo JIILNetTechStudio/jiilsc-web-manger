@@ -1,11 +1,11 @@
 {
-  "version": "1.5.10",
+  "version": "1.5.11",
   "date": "2026-11-01",
-  "notes": "修复：1) 守护进程与面板数据目录不一致，导致「面板在线、守护进程离线」，文件/终端/定时任务/导入服务端等 daemon 接口全部 502；2) 面板内一键整包更新无法执行（未识别 assets 整包地址）；3) 更新后重启面板可能用错数据目录；4) Windows 仪表盘系统版本中文乱码；5) AI 常用厂商预设补全正确模型名与最新接口地址；6) AI 对话保险箱读取返回 400；7) 控制台高亮设置读取用错接口导致 400。",
+  "notes": "审计与修复：1) 前端请求层把非 2xx 响应误判为成功（守护进程透传的纯文本错误没有 error 字段），导致失败被静默吞掉；现一律按失败处理并归一错误文案；2) 登录页也显示版本号但接口受登录保护，控制台持续 401；版本接口改为公开；3) 未登录仍在轮询通知，产生 api/notify/recent 401；登录后才轮询；4) 终端创建会话失败时拼出 api/shell/stream?id=undefined 并 401；改为直接提示失败；5) 控制台高亮设置用 GET 请求只接受 POST 的 api/settings/panel 导致 400，改用 GET api/settings；6) AI 对话保险箱 GET 空 body 被解析报错并写 400，改为无 body 时走 query 参数；7) 全量审计 262 处前端请求与后端路由，确认已无「GET 打到只接收 body 的接口」类契约错配；8) AI 常用厂商预设补全正确模型名与接口地址；9) Windows 仪表盘系统版本中文乱码。",
   "assets": {
-    "windows_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.10/scweb-1.5.10-windows-amd64.zip",
-    "windows_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.10/scweb-1.5.10-windows-arm64.zip",
-    "linux_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.10/scweb-1.5.10-linux-amd64.tar.gz",
-    "linux_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.10/scweb-1.5.10-linux-arm64.tar.gz"
+    "windows_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.11/scweb-1.5.11-windows-amd64.zip",
+    "windows_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.11/scweb-1.5.11-windows-arm64.zip",
+    "linux_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.11/scweb-1.5.11-linux-amd64.tar.gz",
+    "linux_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.11/scweb-1.5.11-linux-arm64.tar.gz"
   }
 }
