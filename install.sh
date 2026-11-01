@@ -399,23 +399,33 @@ confirm_os_low() {
   return 1
 }
 
-# -------------------- 安装标识记录（Linux 文件） --------------------
-# 仅用于标识「这台机器装过 SCWebManager、最初装的是哪个版本」，供安装器识别；
-# 面板自身的更新不会改写这里，所以版本永远是最初安装的版本。
+# -------------------- 安装记录（Linux 文件） --------------------
+# 一台机器只允许一套安装，因此文件里只保存一条记录。
+# 面板自身的更新不会改写这里，所以「初始版本」始终是最初安装的版本。
 # 文件：${XDG_CONFIG_HOME:-$HOME/.config}/scweb/installs.list
-# 每行：目录<TAB>初始版本<TAB>安装时间
+# 单行：目录<TAB>当前版本<TAB>安装时间<TAB>架构<TAB>初始版本
+# 旧版可能残留多行，读取时只取最近一条并忽略多余列。
 
 install_registry_file() {
   printf '%s/scweb/installs.list' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+# 读取本机唯一安装记录里的目录（没有记录时返回空）
+registry_dir() {
+  _rgd_file="$(install_registry_file)"
+  [ -s "$_rgd_file" ] || return 0
+  awk -F '\t' 'NF>=2 && $1!="" { print $1; exit }' "$_rgd_file" 2>/dev/null
 }
 
 show_install_hint() {
   [ "$MUTE" -eq 1 ] && return 0
   _rf="$(install_registry_file)"
   [ -s "$_rf" ] || return 0
-  note "本机已有 SCWebManager 安装记录（仅作标识，面板更新不会改动）："
-  awk -F '\t' 'NF>=2 { printf "    %s（初始版本 %s）\n", $1, $2 }' "$_rf"
-  note "多份安装共用 18233 / 18234 端口会冲突，建议只保留一份；仍可继续安装到其他目录。"
+  _hint_line="$(head -n 1 "$_rf" 2>/dev/null)"
+  _hint_dir="$(printf '%s' "$_hint_line" | cut -f1)"
+  [ -n "$_hint_dir" ] || return 0
+  note "本机已安装 SCWebManager：$_hint_dir"
+  note "一台机器只允许一套；如需升级请使用该目录，或先卸载再重装。"
   return 0
 }
 
@@ -425,14 +435,19 @@ record_install() {
   _rver="${RESULT_VERSION:-unknown}"
   mkdir -p "$(dirname "$_rf")" 2>/dev/null || return 0
   _rnow="$(date '+%Y-%m-%dT%H:%M:%S')"
-  if [ -f "$_rf" ] && awk -F '\t' -v d="$_rdir" '$1==d{f=1} END{exit f?0:1}' "$_rf"; then
-    # 已有记录：只更新版本与时间，保留架构 / 别名 / 最后启动等其它列
-    _rtmp="$_rf.tmp.$$"
-    awk -F '\t' -v d="$_rdir" -v v="$_rver" -v t="$_rnow" 'BEGIN{OFS="\t"} $1==d{$2=v;$3=t} {print}' "$_rf" > "$_rtmp" 2>/dev/null \
-      && mv -f "$_rtmp" "$_rf" 2>/dev/null || rm -f "$_rtmp" 2>/dev/null
-    return 0
+  _rinit="$_rver"
+  _rarch=""
+  if [ -f "$_rf" ]; then
+    _rline="$(head -n 1 "$_rf" 2>/dev/null)"
+    _rold="$(printf '%s' "$_rline" | cut -f1)"
+    if [ "$_rold" = "$_rdir" ]; then
+      _rarch="$(printf '%s' "$_rline" | cut -f4)"
+      _rinit="$(printf '%s' "$_rline" | cut -f5)"
+      [ -n "$_rinit" ] || _rinit="$_rver"
+    fi
   fi
-  printf '%s\t%s\t%s\n' "$_rdir" "$_rver" "$_rnow" >> "$_rf" 2>/dev/null || true
+  # 覆盖写入单条记录，旧版多实例残留一并清掉。
+  printf '%s\t%s\t%s\t%s\t%s\n' "$_rdir" "$_rver" "$_rnow" "$_rarch" "$_rinit" > "$_rf" 2>/dev/null || true
   return 0
 }
 
@@ -535,9 +550,19 @@ existing_version() {
 
 # 选定目录后处理两种情况：
 #   1) 该目录的面板正在运行：必须终止后才能重新安装；
-#   2) 该目录已有面板但未运行：选择覆盖安装（保留配置/数据）或另选目录全新安装。
+#   2) 该目录已有面板但未运行：确认覆盖安装（保留配置/数据）。
+# 一台机器只允许一套，安装到记录之外的目录会被直接拒绝。
 resolve_install_target() {
   while :; do
+    _reg_dir="$(registry_dir)"
+    if [ -n "$_reg_dir" ]; then
+      _reg_norm="$(printf '%s' "$_reg_dir" | sed 's:/$::')"
+      _tgt_norm="$(printf '%s' "$INSTALL_DIR" | sed 's:/$::')"
+      if [ "$_reg_norm" != "$_tgt_norm" ]; then
+        bad "本机已安装在 $_reg_dir，一台机器只允许一套，请对那套执行升级或先卸载。"
+        return 1
+      fi
+    fi
     if install_running "$INSTALL_DIR"; then
       bad "检测到该目录下的 SCWebManager 正在运行：$INSTALL_DIR"
       note "面板正在运行，必须先终止进程才能进行重新安装。"
@@ -580,23 +605,19 @@ resolve_install_target() {
       return 0
     fi
     printf '   1) 覆盖安装（修复当前实例：替换程序文件，保留配置与数据）\n'
-    printf '   2) 全新安装（另选一个目录，新增实例，不影响当前实例）\n'
     printf '   0) 取消并退出安装器\n'
-    prompt_read "  请输入 1 / 2 / 0（直接回车 = 1）: "
+    prompt_read "  请输入 1 / 0（直接回车 = 1）: "
     _rt_sel="$(printf '%s' "$REPLY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     case "$_rt_sel" in
       ""|1)
         printf '  继续使用该目录（覆盖安装）\n'
         return 0 ;;
-      2)
-        select_dir
-        [ -n "$INSTALL_DIR" ] || return 1 ;;
       0)
         note "已取消安装。"
         return 1 ;;
       *)
         bad "输入无效：$_rt_sel"
-        note "请输入 1、2 或 0，直接回车执行覆盖安装" ;;
+        note "请输入 1 或 0，直接回车执行覆盖安装" ;;
     esac
   done
 }

@@ -204,21 +204,26 @@ function Get-InstallRecords {
             }
         }
     } catch { }
-    return $out
+    # 旧版可能残留多条记录，按安装时间倒序，后续只用第一条。
+    return ($out | Sort-Object InstalledAt -Descending)
 }
 
-# 选择目录前提示已有安装（只提示，不阻止安装）
+# 选择目录前提示已有安装（一台机器只允许一套，安装到别的目录会被拒绝）
 function Write-InstallRecordHint {
     if ($script:Mute) { return }
     $list = @(Get-InstallRecords)
     if ($list.Count -eq 0) { return }
-    Write-Note "本机已有 SCWebManager 安装记录（仅作标识，面板更新不会改动）："
-    foreach ($it in $list) {
-        $ver = $it.Version
-        if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "未知" }
-        Write-Line "    $($it.Dir)（初始版本 $ver）"
-    }
-    Write-Note "多份安装共用 18233 / 18234 端口会冲突，建议只保留一份；仍可继续安装到其他目录。"
+    $it = $list[0]
+    $ver = $it.Version
+    if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "未知" }
+    Write-Note "本机已安装 SCWebManager：$($it.Dir)（初始版本 $ver）"
+    Write-Note "一台机器只允许一套；如需升级请使用该目录，或先卸载再重装。"
+}
+
+# 目录比较（Windows 路径大小写不敏感，忽略结尾反斜杠）
+function Test-SameDir([string]$a, [string]$b) {
+    if ([string]::IsNullOrWhiteSpace($a) -or [string]::IsNullOrWhiteSpace($b)) { return $false }
+    return ($a.TrimEnd([char]92) -ieq $b.TrimEnd([char]92))
 }
 
 # 安装成功后写入记录（同一目录重复安装时保留最初的版本号）
@@ -227,7 +232,15 @@ function Write-InstallRecord([string]$dir, [string]$version) {
         if (-not (Test-Path $script:RegRoot)) {
             New-Item -Path $script:RegRoot -Force | Out-Null
         }
-        $key = Join-Path $script:RegRoot ("Installs\" + (Get-InstallId $dir))
+        # 只保留本次目录这一条记录，清掉旧版多实例残留。
+        $installs = Join-Path $script:RegRoot "Installs"
+        $mine = Get-InstallId $dir
+        if (Test-Path $installs) {
+            Get-ChildItem -Path $installs -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSChildName -ne $mine } |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $key = Join-Path $script:RegRoot ("Installs\" + $mine)
         $exists = Test-Path $key
         if (-not $exists) {
             New-Item -Path $key -Force | Out-Null
@@ -633,10 +646,17 @@ function Get-ExistingVersion([string]$dir) {
 
 # 选定目录后处理两种情况：
 #   1) 该目录的面板正在运行：必须终止后才能重新安装；
-#   2) 该目录已有面板但未运行：让用户选择覆盖安装（保留配置/数据）或另选目录全新安装。
+#   2) 该目录已有面板但未运行：确认覆盖安装（保留配置/数据）。
+# 一台机器只允许一套，安装到记录之外的目录会被直接拒绝。
 # 返回最终安装目录；返回 $null 表示用户取消。
 function Resolve-InstallTarget([string]$dir) {
     while ($true) {
+        # 一台机器只允许一套：记录里的目录与本次目标不同时直接拒绝第二套安装。
+        $records = @(Get-InstallRecords)
+        if ($records.Count -gt 0 -and -not (Test-SameDir $records[0].Dir $dir)) {
+            Write-Bad "本机已安装在 $($records[0].Dir)，一台机器只允许一套，请对那套执行升级或先卸载。"
+            return $null
+        }
         if (Test-InstallRunning $dir) {
             Write-Bad "检测到该目录下的 SCWebManager 正在运行：$dir"
             Write-Note "面板正在运行，必须先终止进程才能进行重新安装。"
@@ -680,9 +700,8 @@ function Resolve-InstallTarget([string]$dir) {
             return $dir
         }
         Write-Line "   1) 覆盖安装（修复当前实例：替换程序文件，保留配置与数据）"
-        Write-Line "   2) 全新安装（另选一个目录，新增实例，不影响当前实例）"
         Write-Line "   0) 取消并退出安装器"
-        $a = Read-Host "  请输入 1 / 2 / 0（直接回车 = 1）"
+        $a = Read-Host "  请输入 1 / 0（直接回车 = 1）"
         if ($null -eq $a) { $a = "" }
         $a = $a.Trim()
         switch ($a) {
@@ -690,21 +709,13 @@ function Resolve-InstallTarget([string]$dir) {
                 Write-Line "  继续使用该目录（覆盖安装）" Green
                 return $dir
             }
-            "2" {
-                $newDir = Select-InstallDir
-                if ([string]::IsNullOrWhiteSpace($newDir)) {
-                    Write-Note "未选择新目录，已取消安装。"
-                    return $null
-                }
-                $dir = $newDir
-            }
             "0" {
                 Write-Note "已取消安装。"
                 return $null
             }
             default {
                 Write-Bad "输入无效：$a"
-                Write-Note "请输入 1、2 或 0，直接回车执行覆盖安装"
+                Write-Note "请输入 1 或 0，直接回车执行覆盖安装"
             }
         }
     }
