@@ -1,7 +1,7 @@
 {
   "version": "1.5.11",
-  "date": "2026-11-06",
-  "notes": "审计与修复：1) 前端请求层把非 2xx 响应误判为成功（守护进程透传的纯文本错误没有 error 字段），失败被静默吞掉；现一律按失败处理并归一错误文案；2) 网关错误页（Cloudflare 502/504 的整页 HTML）不再原样甩给用户，统一提示「服务暂时不可用」；3) 登录页仍显示版本号但接口受登录保护，控制台持续 401；版本接口改为公开；4) 未登录仍在轮询通知，产生 api/notify/recent 401；登录后才轮询；5) 终端创建会话失败时拼出 api/shell/stream?id=undefined 并 401；改为直接提示失败；6) 控制台高亮设置用 GET 请求只接受 POST 的 api/settings/panel 导致 400，改用 GET api/settings；7) AI 对话保险箱 GET 空 body 被解析报错并写 400，改为无 body 时走 query 参数；8) 守护进程加固：面板拉起 daemon 时把 stdout/stderr 落盘到 data/logs/daemon-console.log，daemon 自身日志写 data/logs/daemon.log，崩溃现场不再丢失；9) 守护进程所有常驻协程加 panic 兜底，单个循环崩溃不再带走整个进程；10) daemon 不可达时面板自动尝试重新拉起（15 秒节流），不再一直显示离线；11) 仪表盘「守护进程离线」会直接显示具体原因（二进制缺失/端口占用/secret 不一致/进程崩溃）；12) 补齐实例性能采样循环（此前被注释误吞，性能分布图无数据）；13) AI 常用厂商预设补全正确模型名与接口地址；14) 收敛为一台机器只允许一套安装（面板 + 守护进程 + 更新器 + 维护程序）：面板启动加机器级单实例锁（Windows 命名互斥体 / Linux flock），安装脚本拒绝在另一个目录再装一套，守护进程 secret 冲突时自动清理旧安装残留的 daemon；同时移除「面板列表 / 别名」等多实例功能。15) 修复一键安装报「面板内没有这个插件」：插件 DLL 本就内嵌在面板二进制中，安装接口只查磁盘导致失败，现统一走内嵌落盘逻辑，干净安装可直接一键安装服务端；16) 一键安装点击卡顿：版本接口不再同步 HEAD 资产大小、前端复用已加载版本缓存，点击立即弹出任务；17) 任务完成后自动刷新实例列表与详情，不再出现「安装主程序」需手动刷新；18) 导入/创建实例的守护进程注册改为后台异步，点击立即返回；19) 文件管理器与所有选择器统一：显示盘标（真实卷标/本地磁盘/可移动磁盘），支持手动输入路径回车跳转；20) AI 回答流式输出实时解析 Markdown；21) 性能曲线 TPS 轴固定 0-20 并标注满帧说明。",
+  "date": "2026-11-07",
+  "notes": "审计与修复：1) 前端请求层把非 2xx 响应误判为成功（守护进程透传的纯文本错误没有 error 字段），失败被静默吞掉；现一律按失败处理并归一错误文案；2) 网关错误页（Cloudflare 502/504 的整页 HTML）不再原样甩给用户，统一提示「服务暂时不可用」；3) 登录页仍显示版本号但接口受登录保护，控制台持续 401；版本接口改为公开；4) 未登录仍在轮询通知，产生 api/notify/recent 401；登录后才轮询；5) 终端创建会话失败时拼出 api/shell/stream?id=undefined 并 401；改为直接提示失败；6) 控制台高亮设置用 GET 请求只接受 POST 的 api/settings/panel 导致 400，改用 GET api/settings；7) AI 对话保险箱 GET 空 body 被解析报错并写 400，改为无 body 时走 query 参数；8) 守护进程加固：面板拉起 daemon 时把 stdout/stderr 落盘到 data/logs/daemon-console.log，daemon 自身日志写 data/logs/daemon.log，崩溃现场不再丢失；9) 守护进程所有常驻协程加 panic 兜底，单个循环崩溃不再带走整个进程；10) daemon 不可达时面板自动尝试重新拉起（15 秒节流），不再一直显示离线；11) 仪表盘「守护进程离线」会直接显示具体原因（二进制缺失/端口占用/secret 不一致/进程崩溃）；12) 补齐实例性能采样循环（此前被注释误吞，性能分布图无数据）；13) AI 常用厂商预设补全正确模型名与接口地址；14) 收敛为一台机器只允许一套安装（面板 + 守护进程 + 更新器 + 维护程序）：面板启动加机器级单实例锁（Windows 命名互斥体 / Linux flock），安装脚本拒绝在另一个目录再装一套，守护进程 secret 冲突时自动清理旧安装残留的 daemon；同时移除「面板列表 / 别名」等多实例功能。15) 修复一键安装报「面板内没有这个插件」：插件 DLL 本就内嵌在面板二进制中，安装接口只查磁盘导致失败，现统一走内嵌落盘逻辑，干净安装可直接一键安装服务端；16) 一键安装点击卡顿：版本接口不再同步 HEAD 资产大小、前端复用已加载版本缓存，点击立即弹出任务；17) 任务完成后自动刷新实例列表与详情，不再出现「安装主程序」需手动刷新；18) 导入/创建实例的守护进程注册改为后台异步，点击立即返回；19) 文件管理器与所有选择器统一：显示盘标（真实卷标/本地磁盘/可移动磁盘），支持手动输入路径回车跳转；20) AI 回答流式输出实时解析 Markdown；21) 性能曲线 TPS 轴固定 0-20 并标注满帧说明。22) 远程性能：前端静态资源启动时预 gzip 并按内容版本号一年 immutable 缓存（index 不再每次全量下发 1.5MB），SSE 增加 no-transform 与心跳，避免 Cloudflare/隧道缓冲导致半分钟才刷新；23) AI 对话页改为独立容器，仅消息区滚动，标题、审批条与会话菜单固定；24) 创造模式玩家整块隐藏背包卡片，不再显示半截；25) AI 工具：ask_user 与 vault 改为默认开启，已关闭工具仍向模型暴露完整定义与原因并可引导开启，新增 player_action（可直接改血量/模式/背包等）与 tool_status，审批拒绝附带明确理由与下一步指引。",
   "assets": {
     "windows_amd64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.11/scweb-1.5.11-windows-amd64.zip",
     "windows_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.11/scweb-1.5.11-windows-arm64.zip",
@@ -9,9 +9,9 @@
     "linux_arm64": "https://gitee.com/JIILStudio/jiilsc-web-manger/releases/download/1.5.11/scweb-1.5.11-linux-arm64.tar.gz"
   },
   "assets_sha256": {
-    "windows_amd64": "ec45f91c15dde18091680418c2babda14b2cb8b0b593b5986a0515646de124d7",
-    "windows_arm64": "3d897f711b8bb52c3c6e1a14339a76fd0ddac342214e1677ce42d32f276c44d0",
-    "linux_amd64": "d1b9d25e61334ab1bfdf5cbcde6d8e70e5402e11aec92ab45a41ba98ce59c88e",
-    "linux_arm64": "25ee632521b287ad3a15858141bc07188f27726914bbc0a40a15430beb06cb19"
+    "windows_amd64": "569336d9ca6c84f6586877c1fb566115b82ee3b476d96362ab01b70ebcda1954",
+    "windows_arm64": "e8654148d70c1bc8de49a1c568e75548cb9ebd9ad86e942d6cf44163be64aba3",
+    "linux_amd64": "784f81ef798d32c93fc113e096a0cbbb6ae48de46e7f9a9650d78238331c3278",
+    "linux_arm64": "4d493a0ae92d591dc67945ca7a792753e129081024d136b49d2c0dd39c89cf92"
   }
 }
