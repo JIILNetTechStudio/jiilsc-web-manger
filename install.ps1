@@ -158,6 +158,25 @@ function Write-Line($text, $color) {
     if ($color) { Write-Host $text -ForegroundColor $color } else { Write-Host $text }
 }
 
+# 读取交互输入：stdin 被重定向（管道/无控制台）时用 Console.In，
+# 到达 EOF 返回 $null。所有调用方必须把 $null 当作「中止/取消」，
+# 绝不能把空输入当成默认值继续循环（否则无控制台时菜单会无限循环刷日志）。
+function Read-Answer([string]$prompt) {
+    try {
+        if ([Console]::IsInputRedirected) {
+            if ($prompt -and -not $script:Mute) { Write-Host $prompt -NoNewline }
+            $line = [Console]::In.ReadLine()
+            if ($null -eq $line) { return $null }
+            return [string]$line
+        }
+        $a = Read-Host $prompt
+        if ($null -eq $a) { return $null }
+        return [string]$a
+    } catch {
+        return $null
+    }
+}
+
 # 没有 PowerShell 的机器如何手动安装（失败时提示）
 function Write-ManualHint {
     if ($script:Mute) { return }
@@ -551,9 +570,27 @@ function Select-InstallDir {
     $default = Join-Path $env:LOCALAPPDATA "SCWebManager"
     Write-Step "选择安装目录"
 
-    # 预填（-1 <目录>）优先；静默模式下没有预填则直接用默认目录
+    # 预填（-1 <目录>）优先；静默模式下没有预填则自动选择「真正在运行的那套」：
+    #   1) 优先正在运行的面板所在目录（保证覆盖的就是当前在用的程序文件）；
+    #   2) 其次使用安装记录里的目录；
+    #   3) 都没有才用默认目录。
+    # 旧逻辑无条件用默认目录，若正在运行的是另一目录（例如手动解压/开发构建），
+    # 会把新版装到别处，用户刷新浏览器看到的仍是旧面板。
     $pre = Get-Prefill 1
-    if ([string]::IsNullOrWhiteSpace($pre) -and $script:OptSilent) { $pre = $default }
+    if ([string]::IsNullOrWhiteSpace($pre) -and $script:OptSilent) {
+        $runningDir = Get-RunningPanelDir
+        if (-not [string]::IsNullOrWhiteSpace($runningDir)) {
+            Write-Line "  检测到正在运行的面板：$runningDir（静默模式直接覆盖该目录）"
+            return (Format-InstallDir $runningDir)
+        }
+        $records = @(Get-InstallRecords)
+        if ($records.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$records[0].Dir) -and
+            (Test-Path -LiteralPath ([string]$records[0].Dir) -PathType Container)) {
+            Write-Line "  检测到已安装记录：$($records[0].Dir)（静默模式覆盖该目录）"
+            return (Format-InstallDir ([string]$records[0].Dir))
+        }
+        $pre = $default
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($pre)) {
         $chosen = Format-InstallDir $pre
@@ -570,8 +607,11 @@ function Select-InstallDir {
         Write-Line "   1) 使用默认目录（$default）"
         Write-Line "   2) 手动输入目录"
         Write-Line "   3) 打开文件管理器选择目录"
-        $a = Read-Host "  请输入 1 / 2 / 3（直接回车 = 1）"
-        if ($null -eq $a) { $a = "" }
+        $a = Read-Answer "  请输入 1 / 2 / 3（直接回车 = 1）"
+        if ($null -eq $a) {
+            $script:FailMsg = "输入已结束（EOF），安装中止"
+            return ""
+        }
         $a = $a.Trim()
         switch ($a) {
             { $_ -eq "" -or $_ -eq "1" } {
@@ -579,7 +619,11 @@ function Select-InstallDir {
                 Write-Line "  使用默认目录：$chosen" Green
             }
             "2" {
-                $p = Read-Host "  请输入安装目录的完整路径"
+                $p = Read-Answer "  请输入安装目录的完整路径"
+                if ($null -eq $p) {
+                    $script:FailMsg = "输入已结束（EOF），安装中止"
+                    return ""
+                }
                 $p = Format-InstallDir $p
                 if (Test-InstallDirPath $p) {
                     $chosen = $p
@@ -612,14 +656,41 @@ function Select-InstallDir {
 
 # -------------------- 已安装 / 正在运行检测 --------------------
 
+# 返回本机正在运行的面板的安装目录（从进程可执行文件路径推断），没有则返回空
+function Get-RunningPanelDir {
+    try {
+        $proc = Get-Process -Name scweb-panel -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($proc) {
+            $path = $null
+            try { $path = $proc.Path } catch { }
+            if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+                return (Split-Path -Parent $path)
+            }
+        }
+    } catch { }
+    return ""
+}
+
 # 该目录下的面板或守护进程是否正在运行（先看 runtime.json，再按可执行文件路径匹配）
 function Test-InstallRunning([string]$dir) {
     $prefix = $dir.TrimEnd([char]92) + '\'
-    $rt = Join-Path $dir "runtime.json"
-    if (Test-Path -LiteralPath $rt) {
+    # 面板运行时写的是 <安装目录>\data\runtime.json；旧版只查 <安装目录>\runtime.json，
+    # 导致覆盖安装时检测不到运行中的进程，复制阶段才因文件占用失败。
+    foreach ($rt in @((Join-Path $dir "data\runtime.json"), (Join-Path $dir "runtime.json"))) {
+        if (-not (Test-Path -LiteralPath $rt)) { continue }
         try {
             $j = Get-Content -LiteralPath $rt -Raw -ErrorAction Stop | ConvertFrom-Json
-            if ($j.pid -and (Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue)) { return $true }
+            $rtPid = [int]$j.pid
+            if ($rtPid -gt 0) {
+                $proc = Get-Process -Id $rtPid -ErrorAction SilentlyContinue
+                # 被强杀后 Get-Process -Id 仍可能短暂返回已退出对象（HasExited=true），
+                # 必须确认进程名且未退出，否则会误判「仍在运行」而拒绝安装。
+                if ($proc) {
+                    try {
+                        if (-not $proc.HasExited -and $proc.ProcessName -eq 'scweb-panel') { return $true }
+                    } catch { }
+                }
+            }
         } catch { }
     }
     $found = $false
@@ -627,7 +698,13 @@ function Test-InstallRunning([string]$dir) {
         Get-Process -Name scweb-panel, scweb-daemon -ErrorAction SilentlyContinue | ForEach-Object {
             $p = $null
             try { $p = $_.Path } catch { }
-            if ($p -and $p.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $found = $true }
+            if ($p) {
+                if ($p.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $found = $true }
+            } else {
+                # 某些环境下 Path 属性不可读（权限/进程来源不同），此时无法按路径判断，
+                # 按「本机只允许一套」原则视为运行中，交给 Stop-PanelProcesses 结束。
+                $found = $true
+            }
         }
     } catch { }
     return $found
@@ -675,8 +752,11 @@ function Resolve-InstallTarget([string]$dir) {
             } else {
                 Write-Line "   1) 终止正在运行的进程并继续安装"
                 Write-Line "   0) 取消并退出安装器"
-                $a = Read-Host "  请输入 1 / 0（直接回车 = 0）"
-                if ($null -eq $a) { $a = "" }
+                $a = Read-Answer "  请输入 1 / 0（直接回车 = 0）"
+                if ($null -eq $a) {
+                    Write-Note "输入已结束（EOF），已取消安装。"
+                    return $null
+                }
                 $a = $a.Trim()
                 if ($a -eq "" -or $a -eq "0") {
                     Write-Note "已取消：请先通过维护工具或任务管理器停止面板后再安装。"
@@ -710,8 +790,11 @@ function Resolve-InstallTarget([string]$dir) {
         }
         Write-Line "   1) 覆盖安装（修复当前实例：替换程序文件，保留配置与数据）"
         Write-Line "   0) 取消并退出安装器"
-        $a = Read-Host "  请输入 1 / 0（直接回车 = 1）"
-        if ($null -eq $a) { $a = "" }
+        $a = Read-Answer "  请输入 1 / 0（直接回车 = 1）"
+        if ($null -eq $a) {
+            Write-Note "输入已结束（EOF），已取消安装。"
+            return $null
+        }
         $a = $a.Trim()
         switch ($a) {
             { $_ -eq "" -or $_ -eq "1" } {
@@ -772,7 +855,9 @@ function Get-VersionConfig {
     }
 
     try {
-        $resp = Invoke-WebRequest -Uri $script:VersionsUrl -UseBasicParsing -TimeoutSec 30
+        # 加时间戳绕过 Gitee raw 的 CDN 缓存，确保每次安装/升级都拿到最新版本清单与哈希
+        $ts = [DateTime]::UtcNow.Ticks
+        $resp = Invoke-WebRequest -Uri ($script:VersionsUrl + "?t=" + $ts) -UseBasicParsing -TimeoutSec 30
         $cfg = $resp.Content | ConvertFrom-Json
         if ($cfg -and $cfg.versions) {
             Write-Ok "已从仓库获取版本列表"
@@ -803,19 +888,19 @@ function Get-SortedVersions($versions) {
 function Confirm-Yes([string]$prompt) {
     if ([string]::IsNullOrWhiteSpace($prompt)) { $prompt = "是否立即开始安装？(y/n)" }
     while ($true) {
-        $a = Read-Host $prompt
-        if ($null -ne $a) {
-            switch ($a.Trim().ToLower()) {
-                "y" { return $true }
-                "n" { return $false }
-            }
+        $a = Read-Answer $prompt
+        if ($null -eq $a) { return $false }
+        switch ($a.Trim().ToLower()) {
+            "y" { return $true }
+            "n" { return $false }
         }
         Write-Host "  请输入 y 或 n" -ForegroundColor Yellow
     }
 }
 
 function Confirm-DefaultYes($prompt) {
-    $a = Read-Host $prompt
+    $a = Read-Answer $prompt
+    if ($null -eq $a) { return $false }
     if ([string]::IsNullOrWhiteSpace($a)) { return $true }
     if ($a.Trim().ToLower() -eq "n") { return $false }
     return $true
@@ -856,8 +941,11 @@ function Select-Version($cfg) {
         Write-Host "  1) 安装最新版本"
         Write-Host "  0) 手动输入版本号"
         Write-Host "  2) 列出全部版本"
-        $c = Read-Host "请选择 [1/0/2]"
-        if ($null -eq $c) { $c = "" }
+        $c = Read-Answer "请选择 [1/0/2]"
+        if ($null -eq $c) {
+            $script:FailMsg = "输入已结束（EOF），安装中止"
+            return $null
+        }
         $c = $c.Trim()
 
         if ($c -eq "1") {
@@ -872,8 +960,11 @@ function Select-Version($cfg) {
             continue
         } elseif ($c -eq "0") {
             while ($true) {
-                $v = Read-Host "请输入版本号（输入 0 返回菜单）"
-                if ($null -eq $v) { $v = "" }
+                $v = Read-Answer "请输入版本号（输入 0 返回菜单）"
+                if ($null -eq $v) {
+                    $script:FailMsg = "输入已结束（EOF），安装中止"
+                    return $null
+                }
                 $v = $v.Trim()
                 if ($v -eq "0") { break }
                 $entry = $list | Where-Object { [string]$_.version -eq $v } | Select-Object -First 1
@@ -999,8 +1090,29 @@ function Invoke-InstallAttempt($entry, $dir) {
         return (Install-FailResult "安装包解压失败（文件可能损坏或被拦截）：$($_.Exception.Message)")
     }
 
+    # 覆盖安装前必须确保目标目录没有运行中的面板/守护进程，否则文件被占用，
+    # Copy-Item 会失败（旧版忽略了该错误并继续打印「已安装」，实际文件没替换）。
+    if (Test-InstallRunning $dir) {
+        [void](Stop-PanelProcesses $dir)
+        $stopped = $false
+        for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Milliseconds 200
+            if (-not (Test-InstallRunning $dir)) { $stopped = $true; break }
+        }
+        if (-not $stopped) {
+            [void](Stop-PanelProcesses $dir)
+            Start-Sleep -Milliseconds 1000
+        }
+        if (Test-InstallRunning $dir) {
+            return (Install-FailResult "安装目录下的 SCWebManager 仍在运行，请先停止后再安装")
+        }
+        Write-Note "已停止正在运行的 SCWebManager 进程，继续覆盖安装"
+    }
+
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = "Stop"
     try {
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        New-Item -ItemType Directory -Force -Path $dir -ErrorAction Stop | Out-Null
         $items = @(Get-ChildItem -LiteralPath $stage -Force)
         if ($items.Count -eq 0) {
             return (Install-FailResult "安装包内容为空")
@@ -1012,13 +1124,20 @@ function Invoke-InstallAttempt($entry, $dir) {
                     Write-Note "保留已有用户数据目录：$dst"
                     continue
                 }
-                Copy-Item -LiteralPath $item.FullName -Destination $dst -Recurse -Force
+                Copy-Item -LiteralPath $item.FullName -Destination $dst -Recurse -Force -ErrorAction Stop
             } else {
-                Copy-Item -LiteralPath $item.FullName -Destination $dst -Force
+                # 目标同名路径若已是目录，Copy-Item 会把文件复制进该目录并「假成功」，
+                # 必须明确失败，避免安装器随后把目录当成可执行文件。
+                if ((Test-Path -LiteralPath $dst) -and (Get-Item -LiteralPath $dst -Force).PSIsContainer) {
+                    throw "目标路径是目录，无法写入文件：$dst"
+                }
+                Copy-Item -LiteralPath $item.FullName -Destination $dst -Force -ErrorAction Stop
             }
         }
     } catch {
         return (Install-FailResult "写入安装目录失败（权限不足或文件被占用）：$($_.Exception.Message)")
+    } finally {
+        $ErrorActionPreference = $oldEap
     }
 
     try {
@@ -1030,10 +1149,32 @@ function Invoke-InstallAttempt($entry, $dir) {
     # 本机安全软件对未签名程序的启发式拦截。
     $missing = @()
     foreach ($n in @("scweb-panel.exe", "scweb-daemon.exe", "scweb-updater.exe")) {
-        if (-not (Test-Path -LiteralPath (Join-Path $dir $n))) { $missing += $n }
+        if (-not (Test-Path -LiteralPath (Join-Path $dir $n) -PathType Leaf)) { $missing += $n }
     }
     if ($missing.Count -gt 0) {
         return (Install-FailResult ("写入后被删除：$($missing -join '、')。这通常是本机安全软件对未签名程序的拦截，请先把 $dir 加入信任目录，然后重试安装"))
+    }
+
+    # 替换校验：逐个比对解压包与安装目录中文件的 SHA256。
+    # 文件被占用/安全软件拦截时 Copy-Item 可能「看起来成功」但内容没变，
+    # 旧版只打印「已安装」，用户刷新后仍是旧面板。这里必须逐字节确认已替换。
+    $stageFiles = @(Get-ChildItem -LiteralPath $stage -File -Force -ErrorAction SilentlyContinue)
+    foreach ($sf in $stageFiles) {
+        $dst = Join-Path $dir $sf.Name
+        $want = (Get-FileHash -LiteralPath $sf.FullName -Algorithm SHA256).Hash
+        $got = ""
+        try { $got = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash } catch { }
+        if ($want -ne $got) {
+            return (Install-FailResult "程序文件未替换成功：$($sf.Name)（目标目录文件被占用或被安全软件拦截，请停止面板/加信任后重试）")
+        }
+    }
+
+    # 覆盖安装后强制重新登录：面板会把登录会话持久化到 data\sessions.json，
+    # 不清除的话即使程序已替换，刷新浏览器仍然沿用旧会话，无法据此确认是否真的换了新程序。
+    $sessions = Join-Path $dir "data\sessions.json"
+    if (Test-Path -LiteralPath $sessions) {
+        Remove-Item -LiteralPath $sessions -Force -ErrorAction SilentlyContinue
+        Write-Note "已清除旧登录会话：覆盖安装完成后需要重新登录"
     }
 
     Write-Ok "已安装到 $dir"
@@ -1049,7 +1190,12 @@ function Install-Version($entry, $dir) {
         $r = Invoke-InstallAttempt $entry $dir
         if ($r.Ok) { return $true }
         Write-Bad "安装失败：$($r.Reason)"
-        if ($script:Mute) { return $false }
+        # 静默/JSON 模式不打印人类可读输出，但最终 JSON 必须带回真实失败原因，
+        # 否则调用方只能看到笼统的「下载或写入失败」，无法定位/自动重试。
+        if ($script:Mute) {
+            $script:FailMsg = [string]$r.Reason
+            return $false
+        }
         if (-not (Confirm-Yes "是否重试安装？(y/n)")) {
             Write-Note "已放弃本次安装；可稍后手动下载安装包解压到 $dir"
             return $false
@@ -1093,7 +1239,9 @@ function Stop-PanelProcesses($dir) {
         Get-Process -Name scweb-panel, scweb-daemon -ErrorAction SilentlyContinue | ForEach-Object {
             $path = $null
             try { $path = $_.Path } catch { }
-            if ($path -and $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            # 路径可读时只结束本安装目录下的进程；路径不可读时（常见于提权/跨会话启动），
+            # 按本机单套安装原则直接结束同名进程，避免残留进程占用 exe 导致复制失败。
+            if (-not $path -or $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
                 Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
                 $count++
             }
@@ -1254,8 +1402,11 @@ function Start-PanelWithRetry($dir, $entry) {
         Write-Line "   2) 重新下载并安装该版本（文件缺失时用这个）"
         Write-Line "   3) 打开安装目录（查看日志 / 手动启动）"
         Write-Line "   0) 放弃并退出安装器"
-        $c = Read-Host "  请输入 1 / 2 / 3 / 0"
-        if ($null -eq $c) { $c = "" }
+        $c = Read-Answer "  请输入 1 / 2 / 3 / 0"
+        if ($null -eq $c) {
+            $script:FailMsg = "输入已结束（EOF），安装中止"
+            return $false
+        }
         switch ($c.Trim()) {
             "1" { continue }
             "2" {
@@ -1302,8 +1453,12 @@ function Show-Menu($entry, $dir) {
         Write-Host "  0) 退出安装器"
         Write-Host "  1) 立即终止面板"
         Write-Host "  2) 重新拉取面板（同版本重装并启动）"
-        $c = Read-Host "请选择 [0/1/2]"
-        if ($null -eq $c) { $c = "" }
+        $c = Read-Answer "请选择 [0/1/2]"
+        if ($null -eq $c) {
+            Write-Host ""
+            Write-Host "输入已结束（EOF），退出安装器。" -ForegroundColor Yellow
+            return
+        }
         $c = $c.Trim()
 
         if ($c -eq "0") {
@@ -1389,9 +1544,9 @@ function Main {
     $script:ResultVersion = [string]$entry.version
 
     if (-not (Install-Version $entry $dir)) {
-        $script:FailMsg = "安装失败（下载或写入失败）"
+        if (-not $script:FailMsg) { $script:FailMsg = "安装失败（下载或写入失败）" }
         Write-Line ""
-        Write-Line "安装失败。请检查网络后重试，或手动下载安装包解压到 $dir。" Red
+        Write-Line "安装失败：$($script:FailMsg)" Red
         Write-ManualHint
         return $false
     }
@@ -1447,5 +1602,9 @@ Clear-TmpPaths
 # 交互模式失败时停一下，避免双击运行时窗口一闪而过
 if (-not $script:Mute -and -not ($mainOk -and -not $script:FailMsg)) {
     Write-Host ""
-    try { [void](Read-Host "  按回车键退出安装器") } catch { }
+    try { [void](Read-Answer "  按回车键退出安装器") } catch { }
 }
+
+# 用退出码表达最终结果：自动化脚本（-f / -json）据此判断是否真的安装成功
+if ($mainOk -and -not $script:FailMsg) { exit 0 }
+exit 1
