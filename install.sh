@@ -1075,7 +1075,7 @@ install_maintainer() {
 register_scweb_command() {
   if [ -x "$HOME/.local/bin/scweb" ]; then
     ln -sf "scweb" "$HOME/.local/bin/scweb-manage" 2>/dev/null || true
-    if { [ "$(id -u 2>/dev/null || echo 1000)" -eq 0 || [ -w /usr/local/bin ]; } && [ -d /usr/local/bin ]; then
+    if { [ "$(id -u 2>/dev/null || echo 1000)" -eq 0 ] || [ -w /usr/local/bin ]; } && [ -d /usr/local/bin ]; then
       ln -sf "$HOME/.local/bin/scweb" /usr/local/bin/scweb 2>/dev/null || true
       ln -sf "$HOME/.local/bin/scweb" /usr/local/bin/scweb-manage 2>/dev/null || true
     fi
@@ -1176,6 +1176,16 @@ stop_panel() {
   fi
   RUNTIME_PID=""
 
+  # runtime.json 记录的 pid 只要是活的就结束（不再限制 5 分钟新鲜度）：
+  # 升级/重装往往发生在面板跑了很久之后，这条是最可靠的停止入口。
+  if [ -f "$INSTALL_DIR/data/runtime.json" ]; then
+    _sp_rt_pid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$INSTALL_DIR/data/runtime.json" 2>/dev/null | head -n 1)"
+    _sp_rt_name="$(ps -p "$_sp_rt_pid" -o comm= 2>/dev/null | tr -d ' ')"
+    if [ -n "$_sp_rt_pid" ] && [ "$_sp_rt_pid" -ne "$$" ] && [ "$_sp_rt_name" = "scweb-panel" ]; then
+      kill "$_sp_rt_pid" 2>/dev/null && _sp_count=$((_sp_count + 1))
+    fi
+  fi
+
   for _sp_pid in "${PANEL_PID:-}" "${DAEMON_PID:-}"; do
     [ -n "$_sp_pid" ] || continue
     if kill -0 "$_sp_pid" 2>/dev/null; then
@@ -1185,10 +1195,35 @@ stop_panel() {
   PANEL_PID=""
   DAEMON_PID=""
 
-  # 兜底：按可执行文件绝对路径匹配
+  # 兜底：绝对路径匹配 + 进程名精确匹配。
+  # 手工/部署脚本常用 `cd 安装目录 && ./scweb-panel` 启动，此时 cmdline 里没有绝对路径，
+  # 只按 "$INSTALL_DIR/scweb-panel" 匹配会漏杀，导致升级时端口仍被占用、启动报
+  # 「面板启动失败 / address already in use」。本机只允许一个面板实例，按进程名兜底是安全的。
   if command -v pgrep >/dev/null 2>&1; then
-    for _sp_pid in $(pgrep -f "$INSTALL_DIR/scweb-panel" 2>/dev/null) $(pgrep -f "$INSTALL_DIR/scweb-daemon" 2>/dev/null); do
+    for _sp_pid in $(pgrep -f "$INSTALL_DIR/scweb-panel" 2>/dev/null) $(pgrep -f "$INSTALL_DIR/scweb-daemon" 2>/dev/null) $(pgrep -x scweb-panel 2>/dev/null) $(pgrep -x scweb-daemon 2>/dev/null); do
+      [ "$_sp_pid" = "$$" ] && continue
       kill "$_sp_pid" 2>/dev/null && _sp_count=$((_sp_count + 1))
+    done
+  fi
+
+  # 等待优雅退出（面板需要释放单实例锁与端口），超时再强杀
+  _sp_i=0
+  while [ "$_sp_i" -lt 20 ]; do
+    _sp_alive=0
+    if command -v pgrep >/dev/null 2>&1; then
+      for _sp_pid in $(pgrep -x scweb-panel 2>/dev/null) $(pgrep -x scweb-daemon 2>/dev/null); do
+        [ "$_sp_pid" = "$$" ] && continue
+        _sp_alive=1
+      done
+    fi
+    [ "$_sp_alive" -eq 0 ] && break
+    sleep 0.5 2>/dev/null || sleep 1
+    _sp_i=$((_sp_i + 1))
+  done
+  if command -v pgrep >/dev/null 2>&1; then
+    for _sp_pid in $(pgrep -x scweb-panel 2>/dev/null) $(pgrep -x scweb-daemon 2>/dev/null); do
+      [ "$_sp_pid" = "$$" ] && continue
+      kill -9 "$_sp_pid" 2>/dev/null || true
     done
   fi
   sleep 1 2>/dev/null || true
