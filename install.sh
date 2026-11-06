@@ -1023,15 +1023,22 @@ install_maintainer() {
 
   _im_state="$(maintain_state_file)"
   _im_stored=""
+  _im_stored_sha=""
   if [ -f "$_im_state" ]; then
     _im_stored="$(cut -f2 "$_im_state" 2>/dev/null | head -n 1)"
+    _im_stored_sha="$(cut -f4 "$_im_state" 2>/dev/null | head -n 1)"
   fi
+  _im_sha_lc="$(printf '%s' "$_im_sha" | tr 'A-Z' 'a-z')"
 
-  # 已存在且版本一致：只补命令与 PATH，不重复下载
+  # 已存在且版本一致：只补命令与 PATH，不重复下载。
+  # 但同一版本号下的热修（清单里 sha256 变了）必须覆盖 —— 否则维护程序的
+  # 修复永远装不到存量用户机器上。老状态文件没有第 4 列时按「需要更新」处理。
   if [ -x "$_im_dest" ] && [ "$_im_stored" = "$_im_ver" ]; then
-    register_scweb_command
-    maintain_path_hint
-    return 0
+    if [ -z "$_im_sha_lc" ] || { [ -n "$_im_stored_sha" ] && [ "$_im_stored_sha" = "$_im_sha_lc" ]; }; then
+      register_scweb_command
+      maintain_path_hint
+      return 0
+    fi
   fi
   [ -n "$_im_url" ] || { note "该版本未提供维护程序，跳过安装（不影响面板使用）。"; return 0; }
 
@@ -1064,7 +1071,7 @@ install_maintainer() {
   fi
   chmod 0755 "$_im_dest" 2>/dev/null || true
   mkdir -p "$(dirname "$_im_state")" 2>/dev/null
-  printf '%s\t%s\t%s\n' "$_im_dest" "$_im_ver" "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" > "$_im_state" 2>/dev/null || true
+  printf '%s\t%s\t%s\t%s\n' "$_im_dest" "$_im_ver" "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$_im_sha_lc" > "$_im_state" 2>/dev/null || true
   register_scweb_command
   ok "维护程序已安装：$_im_dest（命令 scweb）"
   maintain_path_hint
