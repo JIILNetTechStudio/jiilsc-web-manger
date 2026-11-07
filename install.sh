@@ -33,6 +33,10 @@ OPT_HELP=0
 PREFILL_1=""
 PREFILL_2=""
 PREFILL_3=""
+OPT_PORT=""
+OPT_DAEMON_PORT=""
+OPT_USERNAME=""
+OPT_PASSWORD=""
 MUTE=0
 OS_LOW=0
 OS_LOW_MSG=""
@@ -68,6 +72,10 @@ parse_args() {
       -1) shift; [ $# -gt 0 ] && PREFILL_1="$1" ;;
       -2) shift; [ $# -gt 0 ] && PREFILL_2="$1" ;;
       -3) shift; [ $# -gt 0 ] && PREFILL_3="$1" ;;
+      -port|--port) shift; [ $# -gt 0 ] && OPT_PORT="$1" ;;
+      -daemon-port|--daemon-port) shift; [ $# -gt 0 ] && OPT_DAEMON_PORT="$1" ;;
+      -username|--username) shift; [ $# -gt 0 ] && OPT_USERNAME="$1" ;;
+      -password|--password) shift; [ $# -gt 0 ] && OPT_PASSWORD="$1" ;;
       *) : ;;
     esac
     shift
@@ -82,14 +90,21 @@ usage() {
   cat <<'EOF'
 SCWebManager 安装脚本（Linux）
 
-  sh install.sh [-f] [-json] [-1 目录] [-2 版本] [-3 y/n]
+  sh install.sh [-f] [-json] [-1 目录] [-2 版本] [-3 y/n] [-port 端口] [-daemon-port 端口] [-username 账号 -password 密码]
 
   -f          静默安装：不询问，全部用默认值，最后只输出一条结果
   -json       最终只输出一行标准 JSON（ok/version/installDir/panelUrl/osOk/error）
   -1 <答案>   预填第 1 个问题：安装目录
   -2 <答案>   预填第 2 个问题：版本号（latest 或具体版本）
   -3 <答案>   预填第 3 个问题：系统版本过低时是否强制安装（y/n）
+  -port <端口>        预设面板 HTTP 端口（默认 18233；被占用时面板自动顺延）
+  -daemon-port <端口> 预设守护进程 API 端口（默认 18234）
+  -username <账号>    预设超级管理员账号（必须与 -password 同时传入，跳过初始化向导）
+  -password <密码>    预设超级管理员密码（必须与 -username 同时传入）
   -h          显示本帮助
+
+说明：安装完成后输出的面板地址来自运行时实际端口（data/runtime.json），
+不是硬编码地址；即使默认端口被占用、面板自动顺延，也会输出真实可访问地址。
 
 手动安装（无需本脚本）：
   1) 打开 versions.json，按本机架构找到目标版本的 linux_amd64 或 linux_arm64 下载直链
@@ -1286,6 +1301,81 @@ fallback_port() {
   echo "$DEFAULT_PORT"
 }
 
+# 读取 config.json 中某个端口字段（不存在时输出空）
+config_port_of() { # $1=key $2=config.json
+  [ -f "$2" ] || return 0
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" | head -n 1
+}
+
+port_in_use() { # $1=port
+  [ -n "$1" ] || return 1
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {found=1} END {exit !found}'
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&-; return 0; } || return 1
+  fi
+}
+
+port_owner_text() { # $1=port
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {print}' | head -n 1
+  fi
+}
+
+port_owner_pid() { # $1=port
+  port_owner_text "$1" | sed -n 's/.*pid=([0-9][0-9]*).*/\1/p' | head -n 1
+}
+
+# 端口冲突诊断：打印占用者信息，交互式询问是否终止；静默模式下保留占用者
+handle_port_conflict() { # $1=port $2=名称 $3=panel|daemon
+  [ -n "$1" ] || return 0
+  port_in_use "$1" || return 0
+  printf '\n  ! %s端口 %s 已被占用：\n' "$2" "$1"
+  _po="$(port_owner_text "$1")"
+  [ -n "$_po" ] && printf '      %s\n' "$_po"
+  _pid="$(port_owner_pid "$1")"
+  if [ -n "$_pid" ]; then
+    ps -p "$_pid" -o pid=,user=,comm=,args= 2>/dev/null | sed 's/^/      /'
+  fi
+  if [ "$MUTE" -eq 1 ]; then
+    if [ "$3" = "daemon" ]; then
+      bad "守护进程端口 $1 被占用，且静默模式不能终止其他进程，安装终止"
+      return 1
+    fi
+    note "静默安装：保留占用者，面板会自动顺延到下一个可用端口"
+    return 0
+  fi
+  if [ "$3" = "daemon" ]; then
+    prompt_read "     1) 终止占用进程并继续   3) 退出安装 [1/3]: "
+  else
+    prompt_read "     1) 终止占用进程并继续   2) 保留占用者，面板自动换端口   3) 退出安装 [1/2/3]: "
+  fi
+  _ans="$(printf '%s' "$REPLY" | tr -d '[:space:]')"
+  case "$_ans" in
+    1)
+      if [ -z "$_pid" ] || [ "$_pid" -le 1 ] || [ "$_pid" -eq "$$" ]; then
+        bad "无法自动终止该进程（pid=${_pid:-未知}），请手动处理后重试"
+        return 1
+      fi
+      kill -TERM "$_pid" 2>/dev/null || true
+      _k=0
+      while [ "$_k" -lt 10 ] && port_in_use "$1"; do sleep 0.5; _k=$((_k + 1)); done
+      if port_in_use "$1"; then kill -9 "$_pid" 2>/dev/null || true; sleep 0.5; fi
+      if port_in_use "$1"; then bad "端口 $1 仍被占用，安装终止"; return 1; fi
+      ok "已终止占用进程（pid $_pid），端口 $1 已释放"
+      ;;
+    2)
+      if [ "$3" = "daemon" ]; then bad "守护进程端口不支持自动顺延，安装终止"; return 1; fi
+      note "保留占用者，面板启动时会自动顺延到下一个可用端口"
+      ;;
+    *)
+      bad "安装已取消"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 start_panel() {
   step "启动面板"
   if [ ! -f "$INSTALL_DIR/scweb-daemon" ]; then
@@ -1300,6 +1390,21 @@ start_panel() {
   stop_panel >/dev/null 2>&1
   rm -f "$INSTALL_DIR/data/runtime.json" 2>/dev/null
 
+  _cfg="$INSTALL_DIR/data/config.json"
+  _pport="$OPT_PORT"
+  [ -z "$_pport" ] && _pport="$(config_port_of httpPort "$_cfg")"
+  [ -z "$_pport" ] && _pport="$DEFAULT_PORT"
+  _dport="$OPT_DAEMON_PORT"
+  [ -z "$_dport" ] && _dport="$(config_port_of apiPort "$_cfg")"
+  [ -z "$_dport" ] && _dport="18234"
+  for _pv in "$_pport" "$_dport"; do
+    case "$_pv" in
+      *[!0-9]*|"") bad "端口参数无效：$_pv"; return 1 ;;
+    esac
+  done
+  handle_port_conflict "$_pport" "面板" panel || return 1
+  handle_port_conflict "$_dport" "守护进程" daemon || return 1
+
   _sp_pwd="$(pwd)"
   cd "$INSTALL_DIR" 2>/dev/null || {
     bad "无法进入安装目录 $INSTALL_DIR"
@@ -1308,12 +1413,20 @@ start_panel() {
   # -dir 必须是数据目录 data/：面板固定在该目录读写 config.json，
   # 传安装目录会让 daemon 另建一份配置（secret 不同），表现为「面板在线、守护进程离线」。
   mkdir -p "$INSTALL_DIR/data" 2>/dev/null || true
-  nohup "$INSTALL_DIR/scweb-daemon" -dir "$INSTALL_DIR/data" >"$INSTALL_DIR/daemon.log" 2>&1 &
+  _daemon_args=(-dir "$INSTALL_DIR/data")
+  [ -n "$OPT_DAEMON_PORT" ] && _daemon_args+=(-daemon-port "$OPT_DAEMON_PORT")
+  nohup "$INSTALL_DIR/scweb-daemon" "${_daemon_args[@]}" >"$INSTALL_DIR/daemon.log" 2>&1 &
   DAEMON_PID=$!
   ok "守护进程已启动（pid $DAEMON_PID）"
   sleep 2
 
-  nohup "$INSTALL_DIR/scweb-panel" >"$INSTALL_DIR/panel.log" 2>&1 &
+  _panel_args=()
+  [ -n "$OPT_PORT" ] && _panel_args+=(-port "$OPT_PORT")
+  [ -n "$OPT_DAEMON_PORT" ] && _panel_args+=(-daemon-port "$OPT_DAEMON_PORT")
+  if [ -n "$OPT_USERNAME" ] && [ -n "$OPT_PASSWORD" ]; then
+    _panel_args+=(-username "$OPT_USERNAME" -password "$OPT_PASSWORD")
+  fi
+  nohup "$INSTALL_DIR/scweb-panel" "${_panel_args[@]}" >"$INSTALL_DIR/panel.log" 2>&1 &
   PANEL_PID=$!
   cd "$_sp_pwd" 2>/dev/null || true
   ok "面板进程已启动（pid $PANEL_PID）"
@@ -1366,8 +1479,12 @@ show_success() {
     printf '  维护工具：%s/.local/bin/scweb（命令 scweb）\n' "$HOME"
   fi
   printf '\n'
-  printf '  ⚠ 面板尚未配置超级用户，任何能访问该地址的人都可以创建超级用户，\n'
-  printf '    请立即访问并设置密码。\n'
+  if [ -n "$OPT_USERNAME" ] && [ -n "$OPT_PASSWORD" ]; then
+    printf '  ✔ 已预置超级管理员账号：%s（初始化向导已跳过，访问后直接登录）\n' "$OPT_USERNAME"
+  else
+    printf '  ⚠ 面板尚未配置超级用户，任何能访问该地址的人都可以创建超级用户，\n'
+    printf '    请立即访问并设置密码。\n'
+  fi
   sep
 }
 

@@ -33,6 +33,10 @@ $script:OptSilent = $false
 $script:OptJson = $false
 $script:OptHelp = $false
 $script:Prefill = @()
+$script:OptPort = 0
+$script:OptDaemonPort = 0
+$script:OptUsername = ""
+$script:OptPassword = ""
 try {
     for ($script:ArgI = 0; $script:ArgI -lt $args.Count; $script:ArgI++) {
         $a = [string]$args[$script:ArgI]
@@ -43,6 +47,14 @@ try {
                 $script:Prefill[$idx - 1] = [string]$args[$script:ArgI + 1]
                 $script:ArgI++
             }
+        } elseif ($a -ieq '-port' -or $a -ieq '--port') {
+            if (($script:ArgI + 1) -lt $args.Count) { $script:OptPort = [int]$args[$script:ArgI + 1]; $script:ArgI++ }
+        } elseif ($a -ieq '-daemon-port' -or $a -ieq '--daemon-port') {
+            if (($script:ArgI + 1) -lt $args.Count) { $script:OptDaemonPort = [int]$args[$script:ArgI + 1]; $script:ArgI++ }
+        } elseif ($a -ieq '-username' -or $a -ieq '--username') {
+            if (($script:ArgI + 1) -lt $args.Count) { $script:OptUsername = [string]$args[$script:ArgI + 1]; $script:ArgI++ }
+        } elseif ($a -ieq '-password' -or $a -ieq '--password') {
+            if (($script:ArgI + 1) -lt $args.Count) { $script:OptPassword = [string]$args[$script:ArgI + 1]; $script:ArgI++ }
         } elseif ($a -ieq '-f' -or $a -ieq '-silent') {
             $script:OptSilent = $true
         } elseif ($a -ieq '-json') {
@@ -327,6 +339,28 @@ function Register-MaintainerShortcut {
     } catch { }
 }
 
+# 把维护程序目录加入当前用户的 PATH：新开终端后可直接输入 scweb-manage
+function Register-MaintainerPath {
+    try {
+        if (-not (Test-Path -LiteralPath $script:MaintainDir)) { return }
+        $dir = $script:MaintainDir.TrimEnd('\')
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($null -eq $userPath) { $userPath = "" }
+        $parts = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $has = $false
+        foreach ($p in $parts) {
+            if ($p.Trim().TrimEnd('\') -ieq $dir) { $has = $true; break }
+        }
+        if (-not $has) {
+            [Environment]::SetEnvironmentVariable("Path", (@($parts + $dir) -join ';'), "User")
+        }
+        $cur = [string]$env:Path
+        if ($cur -notmatch [regex]::Escape($dir)) {
+            $env:Path = $cur.TrimEnd(';') + ';' + $dir
+        }
+    } catch { }
+}
+
 # 安装/更新维护程序（失败只提示，不影响面板安装）
 function Install-Maintainer($entry) {
     try {
@@ -339,6 +373,7 @@ function Install-Maintainer($entry) {
         # 已存在且版本一致：只补建快捷方式，不重复下载
         if ((Test-Path -LiteralPath $script:MaintainExe) -and ((Get-MaintainerVersion) -eq $ver)) {
             Register-MaintainerShortcut
+            Register-MaintainerPath
             return
         }
         if ([string]::IsNullOrWhiteSpace($url)) {
@@ -376,7 +411,8 @@ function Install-Maintainer($entry) {
         Set-ItemProperty -Path $mk -Name "InstalledAt" -Value (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
 
         Register-MaintainerShortcut
-        Write-Ok "维护程序已安装：$script:MaintainExe（桌面与开始菜单已创建快捷方式）"
+        Register-MaintainerPath
+        Write-Ok "维护程序已安装：$script:MaintainExe（桌面与开始菜单已创建快捷方式，PATH 已注册）"
     } catch {
         Write-Note "维护程序安装出错（不影响面板使用）：$($_.Exception.Message)"
     }
@@ -394,6 +430,12 @@ function Write-Usage {
     Write-Host "  -2 <答案> 预填第 2 个问题：版本号（latest 或具体版本）"
     Write-Host "  -3 <答案> 兼容保留（Windows 版要求 Windows 10 / Server 2016 及以上，不再询问是否强制安装）"
     Write-Host "  -h        显示本帮助"
+    Write-Host "  -port <端口>        预设面板 HTTP 端口（默认 18233；被占用时自动顺延）"
+    Write-Host "  -daemon-port <端口> 预设守护进程 API 端口（默认 18234）"
+    Write-Host "  -username <账号>    预设超级管理员账号（必须与 -password 同时传入，跳过初始化向导）"
+    Write-Host "  -password <密码>    预设超级管理员密码（必须与 -username 同时传入）"
+    Write-Host ""
+    Write-Host "  安装完成后输出的面板地址来自运行时实际端口（data\runtime.json），不是硬编码地址。"
     Write-Host ""
 }
 
@@ -1294,6 +1336,83 @@ function Get-FallbackPort($dir) {
     return $script:DefaultPort
 }
 
+# 读取 config.json 中的端口字段
+function Get-ConfigPort([string]$file, [string]$key) {
+    try {
+        if (-not (Test-Path -LiteralPath $file)) { return 0 }
+        $raw = [string](Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue)
+        $m = [regex]::Match($raw, '"' + [regex]::Escape($key) + '"\s*:\s*([0-9]+)')
+        if ($m.Success) { return [int]$m.Groups[1].Value }
+    } catch { }
+    return 0
+}
+
+function Test-PortInUse([int]$port) {
+    try {
+        return [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+    } catch { return $false }
+}
+
+function Write-PortOwnerInfo([int]$port) {
+    try {
+        foreach ($c in (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)) {
+            $procId = [int]$c.OwningProcess
+            Write-Host ("      {0}:{1}  pid={2}" -f $c.LocalAddress, $c.LocalPort, $procId)
+            if ($procId -gt 0) {
+                $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                if ($p) { Write-Host ("      {0}  pid={1}" -f $p.ProcessName, $p.Id) }
+                $w = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+                if ($w -and $w.CommandLine) { Write-Host ("      " + $w.CommandLine) }
+            }
+        }
+    } catch { }
+}
+
+# 端口冲突诊断：静默模式下保留占用者（面板会自动顺延）；非静默时询问
+function Resolve-PortConflict([int]$port, [string]$label, [string]$kind) {
+    if ($port -le 0) { return $true }
+    if (-not (Test-PortInUse $port)) { return $true }
+    Write-Host ""
+    Write-Host ("  ! {0}端口 {1} 已被占用：" -f $label, $port) -ForegroundColor Yellow
+    Write-PortOwnerInfo $port
+    if ($script:Mute) {
+        if ($kind -eq "daemon") {
+            Write-Bad ("守护进程端口 {0} 被占用，静默模式不能终止其他进程，安装终止" -f $port)
+            return $false
+        }
+        Write-Note ("静默安装：保留占用者，面板会自动顺延到下一个可用端口")
+        return $true
+    }
+    if ($kind -eq "daemon") {
+        $ans = Read-Answer "     1) 终止占用进程并继续   3) 退出安装 [1/3]: "
+    } else {
+        $ans = Read-Answer "     1) 终止占用进程并继续   2) 保留占用者，面板自动换端口   3) 退出安装 [1/2/3]: "
+    }
+    if ($null -eq $ans) { return $false }
+    $ans = ([string]$ans).Trim()
+    if ($ans -eq "1") {
+        $pid2 = 0
+        try {
+            $pid2 = [int](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+        } catch { }
+        if ($pid2 -le 4 -or $pid2 -eq $PID) {
+            Write-Bad ("无法自动终止该进程（pid={0}），请手动处理后重试" -f $pid2)
+            return $false
+        }
+        try { Stop-Process -Id $pid2 -Force -ErrorAction Stop } catch { Write-Bad "终止进程失败：$($_.Exception.Message)"; return $false }
+        Start-Sleep -Milliseconds 800
+        if (Test-PortInUse $port) { Write-Bad "端口 $port 仍被占用，安装终止"; return $false }
+        Write-Ok "已终止占用进程（pid $pid2），端口 $port 已释放"
+        return $true
+    }
+    if ($ans -eq "2" -and $kind -ne "daemon") {
+        Write-Note "保留占用者，面板启动时会自动顺延到下一个可用端口"
+        return $true
+    }
+    Write-Bad "安装已取消"
+    return $false
+}
+
 function Start-Panel($dir) {
     Write-Step "启动面板"
 
@@ -1313,13 +1432,29 @@ function Start-Panel($dir) {
     [void](Stop-PanelProcesses $dir)
     Start-Sleep -Milliseconds 600
 
+    $cfgFile = Join-Path $dir "data\config.json"
+    $panelPort = $script:OptPort
+    if ($panelPort -le 0) { $panelPort = Get-ConfigPort $cfgFile "httpPort" }
+    if ($panelPort -le 0) { $panelPort = $script:DefaultPort }
+    $daemonPort = $script:OptDaemonPort
+    if ($daemonPort -le 0) { $daemonPort = Get-ConfigPort $cfgFile "apiPort" }
+    if ($daemonPort -le 0) { $daemonPort = 18234 }
+    if ($panelPort -lt 1 -or $panelPort -gt 65535 -or $daemonPort -lt 1 -or $daemonPort -gt 65535) {
+        Write-Bad "端口参数无效：panel=$panelPort daemon=$daemonPort（有效范围 1-65535）"
+        return $false
+    }
+    if (-not (Resolve-PortConflict $panelPort "面板" "panel")) { return $false }
+    if (-not (Resolve-PortConflict $daemonPort "守护进程" "daemon")) { return $false }
+
     try {
         # -dir 必须是数据目录 <安装目录>\data：面板固定在该目录读写 config.json，
         # 传安装目录会让 daemon 另建一份配置（secret 不同），表现为「面板在线、守护进程离线」。
         $dataDir = Join-Path $dir "data"
         New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+        $daemonArgs = @("-dir", ('"' + $dataDir + '"'))
+        if ($script:OptDaemonPort -gt 0) { $daemonArgs += @("-daemon-port", [string]$script:OptDaemonPort) }
         $script:DaemonProc = Start-Process -FilePath $daemonExe `
-            -ArgumentList @("-dir", ('"' + $dataDir + '"')) `
+            -ArgumentList $daemonArgs `
             -WorkingDirectory $dir -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $dir "daemon.log") `
             -RedirectStandardError (Join-Path $dir "daemon.err.log")
@@ -1331,10 +1466,16 @@ function Start-Panel($dir) {
     Start-Sleep -Seconds 2
 
     try {
-        $script:PanelProc = Start-Process -FilePath $panelExe `
-            -WorkingDirectory $dir -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput (Join-Path $dir "panel.log") `
-            -RedirectStandardError (Join-Path $dir "panel.err.log")
+        $panelArgs = @()
+        if ($script:OptPort -gt 0) { $panelArgs += @("-port", [string]$script:OptPort) }
+        if ($script:OptDaemonPort -gt 0) { $panelArgs += @("-daemon-port", [string]$script:OptDaemonPort) }
+        if (-not [string]::IsNullOrWhiteSpace($script:OptUsername) -and -not [string]::IsNullOrWhiteSpace($script:OptPassword)) {
+            $panelArgs += @("-username", ('"' + $script:OptUsername + '"'), "-password", ('"' + $script:OptPassword + '"'))
+        }
+        $startArgs = @{ FilePath = $panelExe; WorkingDirectory = $dir; WindowStyle = "Hidden"; PassThru = $true;
+            RedirectStandardOutput = (Join-Path $dir "panel.log"); RedirectStandardError = (Join-Path $dir "panel.err.log") }
+        if ($panelArgs.Count -gt 0) { $startArgs.ArgumentList = $panelArgs }
+        $script:PanelProc = Start-Process @startArgs
     } catch {
         Write-Bad "面板启动失败：$($_.Exception.Message)"
         return $false
@@ -1439,8 +1580,12 @@ function Show-Success($dir) {
         Write-Host "  维护工具：$script:MaintainExe（桌面 / 开始菜单快捷方式）" -ForegroundColor Cyan
     }
     Write-Host ""
-    Write-Host "  ⚠ 面板尚未配置超级用户，任何能访问该地址的人都可以创建超级用户，" -ForegroundColor Yellow
-    Write-Host "    请立即访问并设置密码。" -ForegroundColor Yellow
+    if (-not [string]::IsNullOrWhiteSpace($script:OptUsername) -and -not [string]::IsNullOrWhiteSpace($script:OptPassword)) {
+        Write-Host ("  ✔ 已预置超级管理员账号：{0}（初始化向导已跳过，访问后直接登录）" -f $script:OptUsername) -ForegroundColor Green
+    } else {
+        Write-Host "  ⚠ 面板尚未配置超级用户，任何能访问该地址的人都可以创建超级用户，" -ForegroundColor Yellow
+        Write-Host "    请立即访问并设置密码。" -ForegroundColor Yellow
+    }
     Write-Sep
 }
 
